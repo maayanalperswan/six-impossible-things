@@ -1,0 +1,57 @@
+{
+  "name": "six-impossible-things",
+  "version": "1.0.0",
+  "description": "A daily painting with a derived color palette",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "dist:all": "electron-builder --mac --win --publish never"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.maayanalperswan.six-impossible-things",
+    "productName": "Six Impossible Things",
+    "files": [
+      "index.html",
+      "renderer.js",
+      "main.js",
+      "assets/**/*"
+    ],
+    "mac": {
+      "icon": "assets/icon.png",
+      "category": "public.app-category.lifestyle",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "Six Impossible Things"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Six Impossible Things — Palette Test</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400&display=swap" rel="stylesheet" />
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter',sans-serif;font-weight:300;background:#fff;padding:36px 24px;color:#666;max-width:740px;margin:0 auto}
+  h1{font-size:0.75rem;letter-spacing:0.14em;text-transform:uppercase;color:#bbb;margin-bottom:6px}
+  p.sub{font-size:0.72rem;color:#ccc;margin-bottom:22px;line-height:1.5}
+  .presets{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:16px}
+  .presets button{background:#f0f0f0;color:#666;border:none;font-size:0.68rem;padding:5px 11px;border-radius:3px;cursor:pointer;font-family:'Inter',sans-serif;font-weight:300;letter-spacing:0.04em}
+  .presets button:hover{background:#e0e0e0}
+  .input-row{display:flex;gap:8px;margin-bottom:20px}
+  input{flex:1;border:1px solid #ddd;padding:8px 12px;font-size:0.8rem;border-radius:3px;font-family:'Inter',sans-serif;font-weight:300;color:#555;outline:none}
+  input:focus{border-color:#bbb}
+  button.go{background:#555;color:#fff;border:none;padding:8px 20px;border-radius:3px;cursor:pointer;font-size:0.78rem;font-family:'Inter',sans-serif;font-weight:300;white-space:nowrap}
+  button.go:hover{background:#333}
+  #result{margin-top:4px}
+  img#preview{max-width:100%;max-height:420px;object-fit:contain;border:1px solid #e8e8e8;display:none;margin-bottom:20px;box-shadow:0 2px 12px rgba(0,0,0,0.07)}
+  #msg{font-size:0.72rem;color:#aaa;font-style:italic;margin-bottom:14px;min-height:18px}
+  .swatches{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:6px}
+  .sw{
+    width:78px;height:78px;border-radius:3px;
+    border:1px solid rgba(0,0,0,0.07);
+    display:flex;align-items:flex-end;justify-content:center;
+    overflow:hidden;cursor:pointer;position:relative;
+    transition:transform 0.12s ease,box-shadow 0.12s ease;
+  }
+  .sw:hover{transform:scale(1.06);box-shadow:0 4px 14px rgba(0,0,0,0.15)}
+  .sw .hex{font-size:0.5rem;font-family:monospace;padding:3px 0 5px;width:100%;text-align:center;letter-spacing:0.03em;position:relative;z-index:1}
+  .sw .flash{display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:0.55rem;font-family:'Inter',sans-serif;letter-spacing:0.05em;z-index:2}
+  .sw.copied .flash{display:flex}
+  .sw.copied .hex{opacity:0}
+</style>
+</head>
+<body>
+
+<h1>Six Impossible Things — Palette Test</h1>
+<p class="sub">Paste any direct <code>upload.wikimedia.org</code> image URL and click Extract to run the current palette algorithm.<br>Right-click any painting in the app → Copy Image Address to get its URL.</p>
+
+<div class="presets">
+  <button onclick="go('https://upload.wikimedia.org/wikipedia/commons/thumb/a/aa/London_Charing_Cross_Bridge_%28Derain%29.jpg/1024px-London_Charing_Cross_Bridge_%28Derain%29.jpg')">Derain – Charing Cross</button>
+  <button onclick="go('https://upload.wikimedia.org/wikipedia/commons/thumb/9/94/Pierre-Auguste_Renoir%2C_Le_Moulin_de_la_Galette.jpg/1200px-Pierre-Auguste_Renoir%2C_Le_Moulin_de_la_Galette.jpg')">Renoir – Moulin de la Galette</button>
+  <button onclick="go('https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1024px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg')">Van Gogh – Starry Night</button>
+  <button onclick="go('https://upload.wikimedia.org/wikipedia/commons/thumb/4/4a/Klimt_-_The_Kiss.jpg/800px-Klimt_-_The_Kiss.jpg')">Klimt – The Kiss</button>
+  <button onclick="go('https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/Mona_Lisa%2C_by_Leonardo_da_Vinci%2C_from_C2RMF_retouched.jpg/800px-Mona_Lisa%2C_by_Leonardo_da_Vinci%2C_from_C2RMF_retouched.jpg')">da Vinci – Mona Lisa</button>
+  <button onclick="go('https://upload.wikimedia.org/wikipedia/commons/thumb/f/f4/The_Scream.jpg/800px-The_Scream.jpg')">Munch – The Scream</button>
+</div>
+
+<div class="input-row">
+  <input id="url-input" type="text" placeholder="Paste upload.wikimedia.org image URL…" onkeydown="if(event.key==='Enter')go()" />
+  <button class="go" onclick="go()">Extract</button>
+</div>
+
+<div id="result">
+  <img id="preview" crossorigin="anonymous" />
+  <div id="msg"></div>
+  <div class="swatches" id="swatches"></div>
+</div>
+
+<script>
+'use strict';
+
+// ── FULL LATEST ALGORITHM (synced from renderer.js) ──────────────────────────
+
+const HUE_FAMILIES = [
+  { name: 'red',        hMin: 345, hMax: 360 },
+  { name: 'red2',       hMin:   0, hMax:  18 },
+  { name: 'orange',     hMin:  18, hMax:  40 },
+  { name: 'yellow',     hMin:  40, hMax:  68 },
+  { name: 'chartreuse', hMin:  68, hMax:  88 },
+  { name: 'green',      hMin:  88, hMax: 150 },
+  { name: 'teal',       hMin: 150, hMax: 190 },
+  { name: 'cyan',       hMin: 190, hMax: 220 },
+  { name: 'blue',       hMin: 220, hMax: 265 },
+  { name: 'violet',     hMin: 265, hMax: 295 },
+  { name: 'magenta',    hMin: 295, hMax: 330 },
+  { name: 'pink',       hMin: 330, hMax: 345 },
+];
+
+function rgbToHsl(r,g,b){r/=255;g/=255;b/=255;const max=Math.max(r,g,b),min=Math.min(r,g,b);const l=(max+min)/2;if(max===min)return[0,0,l];const d=max-min;const s=l>0.5?d/(2-max-min):d/(max+min);let h;switch(max){case r:h=((g-b)/d+(g<b?6:0))/6;break;case g:h=((b-r)/d+2)/6;break;default:h=((r-g)/d+4)/6;}return[h*360,s,l];}
+function hexFromRgb(r,g,b){return'#'+[Math.round(r),Math.round(g),Math.round(b)].map(v=>v.toString(16).padStart(2,'0')).join('');}
+function colorDistance(c1,c2){return Math.sqrt((c1[0]-c2[0])**2+(c1[1]-c2[1])**2+(c1[2]-c2[2])**2);}
+function canonicalFamily(n){return n==='red2'?'red':n;}
+function hueFamilyOf(h){for(const f of HUE_FAMILIES){if(f.hMin<=f.hMax){if(h>=f.hMin&&h<f.hMax)return f.name;}else{if(h>=f.hMin||h<f.hMax)return f.name;}}return'red';}
+
+function medianCut(pixels,maxClusters){if(!pixels.length)return[];let buckets=[pixels];while(buckets.length<maxClusters){let widest=-1,widestRange=-1,widestChannel=null;buckets.forEach((b,i)=>{for(const ch of['r','g','b']){const vals=b.map(p=>p[ch]);const range=Math.max(...vals)-Math.min(...vals);if(range>widestRange){widestRange=range;widest=i;widestChannel=ch;}}});if(widestRange<8)break;const bucket=buckets.splice(widest,1)[0];bucket.sort((a,b)=>a[widestChannel]-b[widestChannel]);const mid=Math.floor(bucket.length/2);buckets.push(bucket.slice(0,mid),bucket.slice(mid));}return buckets.filter(b=>b.length).map(b=>{const avg=(ch)=>Math.round(b.reduce((s,p)=>s+p[ch],0)/b.length);return{r:avg('r'),g:avg('g'),b:avg('b'),count:b.length};});}
+
+function extractPalette(canvas, ctx) {
+  const W=canvas.width, H=canvas.height;
+  const imageData=ctx.getImageData(0,0,W,H).data;
+  const total=W*H;
+
+  const pixels=[];
+  for(let i=0;i<imageData.length;i+=4){
+    const r=imageData[i],g=imageData[i+1],b=imageData[i+2],a=imageData[i+3];
+    if(a<128)continue;
+    const[h,s,l]=rgbToHsl(r,g,b);
+    pixels.push({r,g,b,h,s,l});
+  }
+
+  const clusters=medianCut(pixels,80);
+
+  const annotated=clusters.map(c=>{
+    const[h,s,l]=rgbToHsl(c.r,c.g,c.b);
+    const family=canonicalFamily(hueFamilyOf(h));
+    const isNeutral=s<0.07||l<0.05||l>0.96;
+    const isLight=l>0.60;
+    const coverage=c.count/total;
+    return{...c,h,s,l,family,isNeutral,isLight,coverage};
+  }).filter(c=>c.count>=2);
+
+  const familyMap={}, neutrals=[];
+  for(const c of annotated){
+    if(c.isNeutral)neutrals.push(c);
+    else{if(!familyMap[c.family])familyMap[c.family]=[];familyMap[c.family].push(c);}
+  }
+
+  // Split families that span light + dark (e.g. red holds both pink rose + terracotta)
+  const familyEntries=[];
+  for(const[name,members]of Object.entries(familyMap)){
+    const lm=members.filter(m=>m.l>=0.58), dm=members.filter(m=>m.l<0.58);
+    const lRange=members.length>1?Math.max(...members.map(m=>m.l))-Math.min(...members.map(m=>m.l)):0;
+    if(lRange>0.30&&lm.length&&dm.length){
+      familyEntries.push({name:name+'_light',members:lm,isLightSub:true});
+      familyEntries.push({name:name+'_dark', members:dm,isLightSub:false});
+    } else {
+      familyEntries.push({name,members,isLightSub:members.every(m=>m.l>=0.58)});
+    }
+  }
+
+  const families=familyEntries.map(({name,members,isLightSub})=>{
+    const totalArea=members.reduce((s,c)=>s+c.coverage,0);
+    const avgChroma=members.reduce((s,c)=>s+c.s,0)/members.length;
+    const avgLight =members.reduce((s,c)=>s+c.l,0)/members.length;
+    const lightBoost=isLightSub?1.35:1.0;
+    const score=(0.72*totalArea+0.28*avgChroma)*lightBoost;
+    const candidates=members.filter(m=>m.coverage>=0.003);
+    const pool=candidates.length?candidates:members;
+    const rep=pool.reduce((best,m)=>m.s>best.s?m:best);
+    const baseName=name.replace(/_light$|_dark$/,'');
+    return{name,baseName,score,totalArea,avgChroma,avgLight,isLightSub,rep,members};
+  }).sort((a,b)=>b.score-a.score);
+
+  const peakChroma=families.length?families[0].avgChroma:0;
+  const isVivid=peakChroma>0.38;
+  const accentSlots=isVivid?2:1;
+
+  const topFamilyNames=new Set(families.slice(0,3).map(f=>f.name));
+  const allColoredClusters=annotated.filter(c=>!c.isNeutral&&c.s>=0.08);
+
+  let wH=0,wS=0,wL=0,wTotal=0;
+  for(const f of families.slice(0,4)){for(const m of f.members){wH+=m.h*m.coverage;wS+=m.s*m.coverage;wL+=m.l*m.coverage;wTotal+=m.coverage;}}
+  const centroid=wTotal>0?{h:wH/wTotal,s:wS/wTotal,l:wL/wTotal}:{h:180,s:0.3,l:0.5};
+
+  function distFromCentroid(c){
+    const dh=Math.min(Math.abs(c.h-centroid.h),360-Math.abs(c.h-centroid.h))/180;
+    const ds=Math.abs(c.s-centroid.s);
+    const dl=Math.abs(c.l-centroid.l);
+    const warmBoost=(c.h>=30&&c.h<=70)?0.10:0;
+    const lightLean=(centroid.l<0.45&&c.l>0.60)?0.15:0;
+    return dh*0.50+ds*0.25+dl*0.25+warmBoost+lightLean;
+  }
+
+  const accentCandidates=allColoredClusters
+    .filter(c=>!topFamilyNames.has(c.family)||c.s>0.45||c.isLight)
+    .sort((a,b)=>distFromCentroid(b)-distFromCentroid(a));
+
+  const chosenAccents=[];
+  for(const ac of accentCandidates){
+    if(chosenAccents.length>=accentSlots)break;
+    if(!chosenAccents.some(a=>canonicalFamily(hueFamilyOf(a.h))===canonicalFamily(hueFamilyOf(ac.h))&&Math.abs(a.l-ac.l)<0.30))
+      chosenAccents.push(ac);
+  }
+
+  const accentFamilies=new Set(chosenAccents.map(a=>canonicalFamily(hueFamilyOf(a.h))));
+  const remaining=6-chosenAccents.length;
+  const areaSlots=[];
+  for(const f of families){
+    if(areaSlots.length>=remaining)break;
+    if(accentFamilies.has(f.baseName||f.name))continue;
+    const tooClose=areaSlots.some(chosen=>{
+      const dh=Math.min(Math.abs(f.rep.h-chosen.h),360-Math.abs(f.rep.h-chosen.h));
+      const ds=Math.abs(f.rep.s-chosen.s);
+      const valueDiff=Math.abs(f.rep.l-chosen.l);
+      return dh<22&&ds<0.20&&valueDiff<0.28;
+    });
+    if(!tooClose)areaSlots.push(f.rep);
+  }
+
+  const neutralSlots=[];
+  if(areaSlots.length+chosenAccents.length<6){
+    const sn=[...neutrals].sort((a,b)=>b.coverage-a.coverage);
+    for(const n of sn){
+      if(neutralSlots.length>=1)break;
+      const tc=[...areaSlots,...chosenAccents].some(c=>{
+        const dr=Math.abs(n.r-c.r),dg=Math.abs(n.g-c.g),db=Math.abs(n.b-c.b);
+        return(dr+dg+db)<55;
+      });
+      if(!tc)neutralSlots.push(n);
+    }
+  }
+
+  let palette=[
+    ...chosenAccents.map(c=>({hex:hexFromRgb(c.r,c.g,c.b),rgb:[c.r,c.g,c.b],l:c.l})),
+    ...areaSlots.map(c=>({hex:hexFromRgb(c.r,c.g,c.b),rgb:[c.r,c.g,c.b],l:c.l})),
+    ...neutralSlots.map(c=>({hex:hexFromRgb(c.r,c.g,c.b),rgb:[c.r,c.g,c.b],l:c.l})),
+  ].slice(0,6);
+
+  // Value-spread guarantee: force in a light tone if none present
+  const hasLight=palette.some(p=>p.l>0.58);
+  if(!hasLight){
+    const lc=annotated.filter(c=>c.l>0.58&&!c.isNeutral).sort((a,b)=>b.coverage-a.coverage);
+    if(lc.length){
+      const bl=lc[0];
+      let wi=-1,ws=-1;
+      for(let i=0;i<palette.length;i++){
+        const p=palette[i]; if(p.l>0.58)continue;
+        let ss=0;
+        for(let j=0;j<palette.length;j++){if(i===j)continue;const dist=colorDistance(p.rgb,palette[j].rgb);if(dist<80)ss+=(80-dist);}
+        if(ss>ws){ws=ss;wi=i;}
+      }
+      if(wi>=0)palette[wi]={hex:hexFromRgb(bl.r,bl.g,bl.b),rgb:[bl.r,bl.g,bl.b],l:bl.l};
+    }
+  }
+
+  if(palette.length<6){
+    const fallback=[...annotated].sort((a,b)=>b.coverage-a.coverage);
+    for(const c of fallback){
+      if(palette.length>=6)break;
+      const tc=palette.some(p=>colorDistance(p.rgb,[c.r,c.g,c.b])<40);
+      if(!tc)palette.push({hex:hexFromRgb(c.r,c.g,c.b),rgb:[c.r,c.g,c.b],l:c.l});
+    }
+  }
+
+  return palette.slice(0,6).map(p=>({hex:p.hex,rgb:p.rgb}));
+}
+
+// ── UI ────────────────────────────────────────────────────────────────────────
+
+function go(url) {
+  url = url || document.getElementById('url-input').value.trim();
+  if (!url) return;
+  document.getElementById('url-input').value = url;
+  const msg      = document.getElementById('msg');
+  const preview  = document.getElementById('preview');
+  const swatches = document.getElementById('swatches');
+  msg.textContent = 'Loading…';
+  swatches.innerHTML = '';
+  preview.style.display = 'none';
+
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    preview.src = url;
+    preview.style.display = 'block';
+
+    const canvas = document.createElement('canvas');
+    const maxDim = 360;
+    const scale  = Math.min(maxDim / img.naturalWidth, maxDim / img.naturalHeight, 1);
+    canvas.width  = Math.round(img.naturalWidth  * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    try {
+      const colors = extractPalette(canvas, ctx);
+      swatches.innerHTML = '';
+      colors.forEach(c => {
+        const [r,g,b] = c.rgb;
+        const lum = (0.299*r + 0.587*g + 0.114*b) / 255;
+        const labelColor = lum > 0.45 ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.65)';
+        const flashColor = lum > 0.45 ? 'rgba(0,0,0,0.6)'  : 'rgba(255,255,255,0.9)';
+
+        const sw = document.createElement('div');
+        sw.className = 'sw';
+        sw.style.background = c.hex;
+
+        const hexEl = document.createElement('span');
+        hexEl.className = 'hex';
+        hexEl.textContent = c.hex;
+        hexEl.style.color = labelColor;
+        sw.appendChild(hexEl);
+
+        const flash = document.createElement('span');
+        flash.className = 'flash';
+        flash.textContent = 'Copied';
+        flash.style.color = flashColor;
+        sw.appendChild(flash);
+
+        sw.addEventListener('click', () => {
+          navigator.clipboard.writeText(c.hex).catch(()=>{});
+          sw.classList.add('copied');
+          setTimeout(()=>sw.classList.remove('copied'), 1000);
+        });
+        swatches.appendChild(sw);
+      });
+      const lVals = colors.map(c => { const[,, l]=rgbToHsl(c.rgb[0],c.rgb[1],c.rgb[2]); return l; });
+      const lRange = (Math.max(...lVals) - Math.min(...lVals)).toFixed(2);
+      msg.textContent = `${colors.length} colors · lightness range ${lRange} · click any swatch to copy hex`;
+    } catch(e) {
+      msg.textContent = 'CORS blocked — use a direct upload.wikimedia.org URL.';
+      console.error(e);
+    }
+  };
+  img.onerror = () => { msg.textContent = 'Could not load image. Check the URL.'; };
+  img.src = url;
+}
+</script>
+</body>
+</html>

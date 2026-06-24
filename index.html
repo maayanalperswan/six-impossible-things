@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Six Impossible Things</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="256x256" href="assets/favicon.png" />
+  <link rel="apple-touch-icon" href="assets/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;1,400&family=Inter:wght@300;400&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #ffffff;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      color: #888;
+      padding: 40px 20px;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+      max-width: 680px;
+    }
+
+    /* ── TODAY VIEW ── */
+    #today-view { width: 100%; display: flex; flex-direction: column; align-items: center; }
+
+    .painting-frame {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10), 0 1px 4px rgba(0,0,0,0.06);
+      padding: 18px;
+      margin-bottom: 20px;
+      width: 100%;
+      max-width: 600px;
+    }
+
+    .painting-frame img {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-height: 500px;
+      object-fit: contain;
+    }
+
+    /* ── ATTRIBUTION ── */
+    .attribution {
+      margin-top: 16px;
+      text-align: center;
+    }
+
+    .attribution .title {
+      font-family: 'EB Garamond', 'Georgia', serif;
+      font-style: italic;
+      font-size: 1.45rem;
+      color: #666;
+      letter-spacing: 0.01em;
+      line-height: 1.3;
+    }
+
+    .attribution .meta {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 300;
+      font-size: 0.65rem;
+      color: #aaa;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+      margin-top: 5px;
+    }
+
+    /* ── PALETTE ── */
+    .palette {
+      display: flex;
+      gap: 10px;
+      margin-top: 22px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .swatch {
+      width: 78px;
+      height: 78px;
+      border-radius: 3px;
+      cursor: pointer;
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+      position: relative;
+      border: 1px solid rgba(0,0,0,0.07);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .swatch:hover { transform: scale(1.06); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
+
+    /* Hex label sits at the bottom of the swatch */
+    .swatch .hex-label {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 400;
+      font-size: 0.52rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 4px 0 5px;
+      width: 100%;
+      text-align: center;
+      /* will be colored by JS based on swatch brightness */
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Copied flash: briefly show "copied" text */
+    .swatch .copy-flash {
+      display: none;
+      position: absolute;
+      inset: 0;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-size: 0.55rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      z-index: 2;
+    }
+    .swatch.copied .copy-flash { display: flex; }
+    .swatch.copied .hex-label  { opacity: 0; }
+
+    /* ── FOOTER ── */
+    .footer {
+      margin-top: 24px;
+      text-align: center;
+    }
+
+    .footer .credit {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 300;
+      font-size: 0.62rem;
+      color: #c0c0c0;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+    }
+
+    /* date · app name separator */
+    .footer .credit .sep {
+      margin: 0 6px;
+      opacity: 0.6;
+    }
+
+    .footer .archive-link {
+      display: block;
+      margin-top: 10px;
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 300;
+      font-size: 0.62rem;
+      color: #c0c0c0;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .footer .archive-link:hover { color: #999; }
+
+    /* ── ARCHIVE VIEW ── */
+    #archive-view { width: 100%; display: none; }
+
+    .archive-header {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 30px;
+      gap: 10px;
+    }
+
+    .archive-header h2 {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 300;
+      font-size: 0.65rem;
+      color: #bbb;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .back-link {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 300;
+      font-size: 0.62rem;
+      color: #c0c0c0;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      cursor: pointer;
+      text-decoration: none;
+    }
+
+    .back-link:hover { color: #999; }
+
+    .archive-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 28px;
+      width: 100%;
+    }
+
+    .archive-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .archive-card img {
+      width: 100%;
+      height: 160px;
+      object-fit: cover;
+      border: 1px solid #e8e8e8;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+    }
+
+    .archive-palette {
+      display: flex;
+      gap: 4px;
+      margin-top: 8px;
+    }
+
+    .archive-swatch {
+      width: 22px;
+      height: 22px;
+      border-radius: 2px;
+      border: 1px solid rgba(0,0,0,0.06);
+    }
+
+    .archive-card .archive-title {
+      font-family: 'EB Garamond', 'Georgia', serif;
+      font-style: italic;
+      font-size: 0.82rem;
+      color: #777;
+      margin-top: 8px;
+      text-align: center;
+    }
+
+    .archive-card .archive-meta {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 300;
+      font-size: 0.58rem;
+      color: #bbb;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      margin-top: 3px;
+      text-align: center;
+    }
+
+    /* ── LOADING / ERROR ── */
+    #status {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+      font-weight: 300;
+      font-size: 0.75rem;
+      color: #c0c0c0;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-align: center;
+      margin-top: 40px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="today-view" style="display:none;">
+      <div class="painting-frame">
+        <img id="painting" src="" alt="" crossorigin="anonymous" />
+      </div>
+      <div class="attribution">
+        <div class="title" id="attr-title"></div>
+        <div class="meta" id="attr-meta"></div>
+      </div>
+      <div class="palette" id="palette"></div>
+      <div class="footer">
+        <div class="credit">
+          <span id="footer-date"></span><span class="sep">·</span>Six Impossible Things by Maayan Alper-Swan
+        </div>
+        <a class="archive-link" id="show-archive">Archive</a>
+      </div>
+    </div>
+
+    <div id="archive-view">
+      <div class="archive-header">
+        <h2>Archive</h2>
+        <a class="back-link" id="show-today">← Today</a>
+      </div>
+      <div class="archive-grid" id="archive-grid"></div>
+    </div>
+
+    <div id="status">Hanging today's painting…</div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
