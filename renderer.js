@@ -1,9 +1,44 @@
 'use strict';
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const CACHE_VERSION    = 11;          // bump to force palette recompute
+const CACHE_VERSION    = 12;          // bump to force recompute (12: CLIP room filtering)
 const PALETTE_VERSION  = 10;          // bump alone to recompute palette only
 const NUM_CANDIDATES   = 5;          // paintings scored per day
+
+// ─── "IN A ROOM" FILTERING (CLIP) ─────────────────────────────────────────────
+// Some Wikidata images are photographs of a painting hanging in a room (frame +
+// wall) rather than a flat reproduction. We score each candidate with a small
+// vision-language model (CLIP, via Transformers.js, loaded from CDN and cached
+// in the browser on first run) and demote any that read as "in a room / framed".
+// A candidate is only shown if EVERY candidate that day reads that way.
+// The model loads lazily; if it can't load, filtering is skipped and the app
+// behaves exactly as before (most-vivid candidate wins).
+const ROOM_THRESHOLD    = 0.57;       // roomScore >= this  ->  treated as "in a room"
+const CLIP_MODEL        = 'Xenova/clip-vit-base-patch32';
+const TRANSFORMERS_CDN  = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+const ROOM_LABELS = [
+  'a painting hanging on a gallery wall with the room and other artworks visible',
+  'a photograph of a framed painting hanging on a wall',
+  'a painting depicted on display in a museum gallery',
+  'a photo of a framed artwork in a room',
+  'a photograph of a painting in a frame on a wall',
+  'a photograph of a framed painting with the wall visible around it',
+  'a painting hanging on a wall, photographed at an angle',
+  'a snapshot of artwork with the floor or room visible',
+  'a framed painting casting a shadow on the wall behind it',
+];
+const FLAT_LABELS = [
+  'a flat digital reproduction of a painting',
+  'a full-frame scan of a painting with no wall or frame',
+  'just the painting itself, edge to edge',
+  'a digital image of a painting only',
+  'a painted portrait of a standing figure on a plain studio background',
+  'white ground paintings or drawings allowed as long as no wall or frame',
+  'a painting that depicts the interior of a room',
+  'a flat reproduction of a painting of a bedroom or interior scene',
+];
+const ALL_LABELS = [...ROOM_LABELS, ...FLAT_LABELS];
+const ROOM_SET   = new Set(ROOM_LABELS);
 const HISTORY_DAYS     = 90;         // days of history to keep
 const ARTIST_COOLDOWN  = 30;         // days before same artist may repeat
 
@@ -451,6 +486,59 @@ function loadImageOnCanvas(url) {
   });
 }
 
+// Lazily load the CLIP pipeline once per session. Returns the pipeline, or null
+// if it can't load (offline / CDN down) — callers then skip filtering.
+let _clipPipe = undefined;   // undefined = not tried, null = failed, object = ready
+let _clipPromise = null;
+async function getClipPipe() {
+  if (_clipPipe !== undefined) return _clipPipe;
+  if (_clipPromise) return _clipPromise;
+  _clipPromise = (async () => {
+    try {
+      const TF = await import(TRANSFORMERS_CDN);
+      TF.env.allowLocalModels = false;
+      TF.env.useBrowserCache  = true;   // cache the model after first download
+      const pipe = await TF.pipeline('zero-shot-image-classification', CLIP_MODEL);
+      _clipPipe = pipe;
+      console.log('[SIT] CLIP model ready');
+      return pipe;
+    } catch (e) {
+      console.warn('[SIT] CLIP model failed to load; room filtering disabled this session:', e.message);
+      _clipPipe = null;
+      return null;
+    }
+  })();
+  return _clipPromise;
+}
+
+// Score a rasterised candidate canvas for "is this a painting in a room?".
+// roomScore = share of probability CLIP puts on the ROOM labels vs the FLAT labels.
+// Graceful: if the model isn't available, returns roomScore 0 (never demoted).
+async function scoreRoomCLIP(canvas) {
+  const pipe = await getClipPipe();
+  if (!pipe) return { roomScore: 0, onWall: false };
+  try {
+    const dataURL = canvas.toDataURL('image/png');
+    const out = await pipe(dataURL, ALL_LABELS);   // [{label, score}], softmax over ALL_LABELS
+    let room = 0, total = 0;
+    for (const o of out) { total += o.score; if (ROOM_SET.has(o.label)) room += o.score; }
+    const roomScore = total > 0 ? room / total : 0;
+    return { roomScore, onWall: roomScore >= ROOM_THRESHOLD };
+  } catch (e) {
+    console.warn('[SIT] CLIP scoring failed for one image:', e.message);
+    return { roomScore: 0, onWall: false };
+  }
+}
+
+// Pick the most vivid candidate, but prefer flat reproductions: only fall back
+// to "in a room" images if EVERY candidate that day looks like one.
+function chooseBest(scored) {
+  if (!scored.length) return null;
+  const flat = scored.filter(s => !s.onWall);
+  const pool = flat.length ? flat : scored;
+  return pool.reduce((best, s) => (!best || s.vividness > best.vividness ? s : best), null);
+}
+
 async function scoreAndExtract(painting) {
   // Resolve direct Commons URL
   const directUrl = await resolveCommonsUrl(painting.imageWiki);
@@ -459,7 +547,9 @@ async function scoreAndExtract(painting) {
 
   const { canvas, ctx } = await loadImageOnCanvas(directUrl);
   const { colors, vividness } = extractPalette(canvas, ctx);
-  return { ...painting, colors, vividness };
+  const { roomScore, onWall } = await scoreRoomCLIP(canvas);
+  console.log(`[SIT] "${painting.title}" vividness=${vividness.toFixed(2)} room=${roomScore.toFixed(2)}${onWall ? ' (in a room — demoted)' : ''}`);
+  return { ...painting, colors, vividness, roomScore, onWall };
 }
 
 // ─── UI ───────────────────────────────────────────────────────────────────────
@@ -547,18 +637,33 @@ function upsertHistory(entry) {
 async function reconstructDay(pool, dateStr) {
   const candidates = pickCandidates(pool, dateStr, new Set());
   if (!candidates.length) return null;
-  const seed = deterministicSeed(dateStr);
-  const pick = candidates[seed % candidates.length];
-  const directUrl = await resolveCommonsUrl(pick.imageWiki);
-  if (!directUrl) return null;
-  const { canvas, ctx } = await loadImageOnCanvas(directUrl);
-  const { colors } = extractPalette(canvas, ctx);
-  return {
-    date: dateStr, ts: Date.parse(dateStr + 'T12:00:00'),
-    paletteVersion: PALETTE_VERSION,
-    qid: pick.qid, title: pick.title, artist: pick.artist, year: pick.year,
-    imageUrl: directUrl, colors,
-  };
+  const seed  = deterministicSeed(dateStr);
+  const n     = candidates.length;
+  const start = seed % n;
+  // Walk candidates in deterministic (seed-rotated) order; take the first that
+  // is NOT "in a room". If every candidate looks like a room, fall back to the
+  // first one we could load. Keeps the archive consistent with the daily filter.
+  let fallback = null;
+  for (let k = 0; k < n; k++) {
+    const pick = candidates[(start + k) % n];
+    let directUrl, canvas, ctx;
+    try {
+      directUrl = await resolveCommonsUrl(pick.imageWiki);
+      if (!directUrl) continue;
+      ({ canvas, ctx } = await loadImageOnCanvas(directUrl));
+    } catch (e) { continue; }
+    const { onWall } = await scoreRoomCLIP(canvas);
+    const { colors } = extractPalette(canvas, ctx);
+    const entry = {
+      date: dateStr, ts: Date.parse(dateStr + 'T12:00:00'),
+      paletteVersion: PALETTE_VERSION,
+      qid: pick.qid, title: pick.title, artist: pick.artist, year: pick.year,
+      imageUrl: directUrl, colors,
+    };
+    if (!onWall) return entry;          // first flat reproduction wins
+    if (!fallback) fallback = entry;    // remember in case all are rooms
+  }
+  return fallback;
 }
 
 async function renderArchive() {
@@ -661,22 +766,23 @@ async function init() {
   const candidates = pickCandidates(pool, today, blocked);
   console.log(`[SIT] Scoring ${candidates.length} candidates…`);
 
-  let best = null;
+  const scoredList = [];
   for (const c of candidates) {
     try {
-      const scored = await scoreAndExtract(c);
-      if (!best || scored.vividness > best.vividness) best = scored;
+      scoredList.push(await scoreAndExtract(c));
     } catch (e) {
       console.warn('[SIT] Skipped candidate:', c.title, e.message);
     }
   }
+
+  const best = chooseBest(scoredList);
 
   if (!best) {
     status.textContent = 'Could not load a painting today. Please reload.';
     return;
   }
 
-  console.log(`[SIT] Chose: "${best.title}" (vividness ${best.vividness.toFixed(2)})`);
+  console.log(`[SIT] Chose: "${best.title}" (vividness ${best.vividness.toFixed(2)}, room ${best.roomScore.toFixed(2)})`);
 
   const entry = {
     date:           today,
