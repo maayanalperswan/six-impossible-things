@@ -1,12 +1,12 @@
 'use strict';
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const CACHE_VERSION    = 12;          // bump to force recompute (12: CLIP room filtering)
-const PALETTE_VERSION  = 11;          // bump alone to recompute palette only (11: guarantee six swatches)
+const CACHE_VERSION    = 13;          // bump to force pool rebuild (13: expanded artist roster)
+const PALETTE_VERSION  = 12;          // bump alone to recompute palette only (12: honest colorfulness metric)
 const NUM_CANDIDATES   = 8;          // paintings scored per day (more candidates → better odds a vivid one is in the mix)
 const NUM_CANDIDATES_STREAK = 12;    // widen the sample on days following a tonal streak
 const ANTISTREAK_LOOKBACK   = 2;     // how many recent displayed days in a row define a "tonal streak"
-const VIVIDNESS_FLOOR       = 1.6;   // total swatch-chroma below this reads as "tonal" — tune from your console logs
+const VIVIDNESS_FLOOR       = 30;    // colorfulness below this reads as "tonal" — NEW scale (~0–100+), tune from your console logs
 
 // ─── "IN A ROOM" FILTERING (CLIP) ─────────────────────────────────────────────
 // Some Wikidata images are photographs of a painting hanging in a room (frame +
@@ -50,18 +50,52 @@ const SCORE_WIDTH      = 512;        // thumbnail width used to SCORE candidates
 const DISPLAY_WIDTH    = 1600;       // larger version fetched only for the one painting actually shown
 
 // Art movements + specific artists to query on Wikidata
-const SUBJECTS = [
-  // Movements
+const MOVEMENTS = [
   'Dada', 'Vienna Secession', 'Art Nouveau', 'Art Deco',
   'Pre-Raphaelite Brotherhood', 'Fauvism', 'Surrealism',
-  'Orientalism in art', 'Impressionism', 'Post-Impressionism',
+  'Orientalism', 'Impressionism', 'Post-Impressionism',
   'Dutch Golden Age painting', 'Russian avant-garde', 'Bauhaus',
   'Symbolism (arts)', 'Early Netherlandish painting', 'Flemish Baroque painting',
-  // Individual artists
-  'Hilma af Klint', 'Egon Schiele', 'J. M. W. Turner',
-  'James McNeill Whistler',
-  'Henri de Toulouse-Lautrec', 'John Singer Sargent',
 ];
+// Individual artists are queried by creator (P170), which Wikidata tags completely —
+// unlike movement tags (P135), which are sparse. Add a colourful painter here and it
+// reliably pulls their whole catalogue. buildPool reads this for both the subject list
+// and the artist-vs-movement decision, so one list keeps everything in sync.
+const ARTISTS = [
+  'Hilma af Klint', 'Egon Schiele', 'J. M. W. Turner', 'James McNeill Whistler', 'Henri de Toulouse-Lautrec',
+  'John Singer Sargent', 'Claude Monet', 'Pierre-Auguste Renoir', 'Berthe Morisot', 'Mary Cassatt',
+  'Vincent van Gogh', 'Paul Gauguin', 'Georges Seurat', 'Paul Signac', 'Henri Matisse',
+  'André Derain', 'Raoul Dufy', 'Wassily Kandinsky', 'Franz Marc', 'August Macke',
+  'Pierre Bonnard', 'Odilon Redon', 'Gustav Klimt', 'Paul Klee', 'Jean-Léon Gérôme',
+  'Maurice de Vlaminck', 'Albert Marquet', 'Henri Manguin', 'Charles Camoin', 'Othon Friesz',
+  'Georges Braque', 'Kees van Dongen', 'Jean Puy', 'Louis Valtat', 'Georges Rouault',
+  'Jules Chéret', 'Théophile Steinlen', 'Leonetto Cappiello', 'George Barbier', 'Olga Boznańska',
+  'Max Kurzweil', 'Koloman Moser', 'Maximilian Lenz', 'Hugo Baar', 'Alphonse Mucha',
+  'Vojtěch Hynais', 'Alois Delug', 'Josef Engelhart', 'Emil Orlik', 'Ferdinand Andri',
+  'Jozef Mehoffer', 'John William Waterhouse', 'Lawrence Alma-Tadema', 'Jean-Auguste-Dominique Ingres', 'Horace Vernet',
+  'David Roberts', 'Eugène Delacroix', 'Alexandre-Gabriel Decamps', 'Thomas Allom', 'John Frederick Lewis',
+  'Prosper Marilhat', 'Charles-Théodore Frère', 'Amadeo Preziosi', 'Eugène Fromentin', 'Charles Landelle',
+  'Alfred Dehodencq', 'Frederick Goodall', 'Gustave Boulanger', 'Alberto Pasini', 'Léon Belly',
+  'Adolf Schreyer', 'Henriette Browne', 'Victor Huguet', 'Josep Tapiró Baró', 'Gustave Guillaumet',
+  'Georges Clairin', 'Henri Regnault', 'Benjamin Constant', 'Frederick Arthur Bridgman', 'Édouard Debat-Ponsan',
+  'Gustav Bauernfeind', 'Edwin Lord Weeks', 'Eugène Alexis Girardet', 'Rudolf Ernst', 'Ludwig Deutsch',
+  'Giulio Rosati', 'Étienne Dinet', 'Fabio Fabbi', 'Edgar Degas', 'Camille Pissarro',
+  'Édouard Manet', 'Alfred Sisley', 'Gustave Caillebotte', 'Frédéric Bazille', 'Eugène Boudin',
+  'Johan Barthold Jongkind', 'Armand Guillaumin', 'Eva Gonzalès', 'Marie Bracquemond', 'Paul Cézanne',
+  'Édouard Vuillard', 'Childe Hassam', 'William Merritt Chase', 'Edmund Tarbell', 'Frank Weston Benson',
+  'Theodore Robinson', 'John Henry Twachtman', 'Julian Alden Weir', 'Lilla Cabot Perry', 'Walter Richard Sickert',
+  'Philip Wilson Steer', 'Giovanni Boldini', 'Joaquín Sorolla', 'Frits Thaulow', 'Max Liebermann',
+  'Lovis Corinth', 'Max Slevogt', 'Paul Sérusier', 'Ernst Ludwig Kirchner', 'Alexej von Jawlensky',
+  'Jan Toorop', 'Fernand Khnopff', 'Georges de Feure', 'Yves Tanguy', 'Paul Nash',
+  'Alberto Savinio', 'Pierre Roy', 'Jindřich Štyrský', 'Héctor Hyppolite', 'Hashiguchi Goyō',
+  'Arshile Gorky', 'Horace Pippin', 'Morris Hirshfield', 'Arthur G. Dove', 'Henry Ossawa Tanner',
+  'Paula Modersohn-Becker', 'Helene Schjerfbeck', 'Augustin Lesage', 'Gustave Moreau', 'Carlos Schwabe',
+  'Camille Bombois', 'Ivan Generalić', 'Louis Vivin', 'André Bauchant', 'Henri Rousseau',
+  'Fujishima Takeji', 'Margaret Macdonald Mackintosh', 'Élisabeth Sonrel', 'Valentin Serov', 'Leon Bakst',
+  'Ferdinand Hodler', 'Victor Borisov-Musatov', 'Edmond-François Aman-Jean', 'Winold Reiss', 'Gerda Wegener',
+  'Umberto Brunelleschi', 'Nils Dardel', 'Kuzma Petrov-Vodkin',
+];
+const SUBJECTS = [...MOVEMENTS, ...ARTISTS];
 
 // ─── HUE FAMILY DEFINITIONS ──────────────────────────────────────────────────
 // Finer warm-band bins so yellow doesn't collapse into orange/red
@@ -280,7 +314,23 @@ function extractPalette(canvas, ctx) {
   palette.sort((a, b) => b.l - a.l);
 
   // Vividness (for daily candidate ranking): mean chroma of the chosen swatches
-  const vividness = palette.reduce((sum, p) => sum + (p.s || 0), 0);
+  // Colorfulness (Hasler–Süsstrunk): how much the hues actually spread across the
+  // opponent-colour channels, area-weighted over every pixel. Unlike summed HSL
+  // saturation — which inflates for very light AND very dark colours, so a
+  // monochrome brown landscape scored as "vivid" as a Matisse — this stays low for
+  // tonal / earth-tone images and high for genuinely multi-hue ones. This is what
+  // chooseBest maximises to pick the day's painting, so the metric must be honest.
+  let sRG = 0, sYB = 0, sRG2 = 0, sYB2 = 0;
+  for (const p of pixels) {
+    const rg = p.r - p.g;
+    const yb = 0.5 * (p.r + p.g) - p.b;
+    sRG += rg; sYB += yb; sRG2 += rg * rg; sYB2 += yb * yb;
+  }
+  const n = pixels.length;
+  const mRG = sRG / n, mYB = sYB / n;
+  const varRG = Math.max(0, sRG2 / n - mRG * mRG);
+  const varYB = Math.max(0, sYB2 / n - mYB * mYB);
+  const vividness = Math.sqrt(varRG + varYB) + 0.3 * Math.sqrt(mRG * mRG + mYB * mYB);
 
   return { colors: palette.slice(0, 6).map(p => ({ hex: p.hex, rgb: p.rgb })), vividness };
 }
@@ -465,35 +515,41 @@ function saveCache(data) {
 
 // ─── POOL ─────────────────────────────────────────────────────────────────────
 async function buildPool(salt = '') {
-  console.log('[SIT] Building painting pool from Wikidata…');
+  console.log(`[SIT] Building painting pool from Wikidata (${SUBJECTS.length} subjects)…`);
   const paintings = [];
   const seen = new Set();
+  const isArtistSubject = new Set(ARTISTS);
+  const CONCURRENCY = 5;   // gentle on Wikidata; cuts a 233-subject build from minutes to ~1 min
 
-  const isArtistSubject = new Set([
-    'Hilma af Klint', 'Egon Schiele', 'J. M. W. Turner',
-    'James McNeill Whistler',
-    'Henri de Toulouse-Lautrec', 'John Singer Sargent',
-  ]);
-
-  for (const subject of SUBJECTS) {
+  async function fetchSubject(subject) {
     const isArtist = isArtistSubject.has(subject);
     const qid = await resolveQid(subject);
-    if (!qid) { console.warn(`[SIT] Could not resolve: ${subject}`); continue; }
+    if (!qid) { console.warn(`[SIT] Could not resolve: ${subject}`); return []; }
     try {
       const rows = await fetchPaintingsForQid(qid, isArtist, salt);
-      for (const r of rows) {
-        // Artist queries fix the creator to the QID, so creatorLabel comes back
-        // empty — stamp the known artist name (the subject we queried) onto them.
-        if (isArtist && !r.artist) r.artist = subject;
-        if (!seen.has(r.qid)) { seen.add(r.qid); paintings.push(r); }
-      }
+      // Artist queries fix the creator to the QID, so creatorLabel comes back
+      // empty — stamp the known artist name (the subject we queried) onto them.
+      if (isArtist) for (const r of rows) if (!r.artist) r.artist = subject;
       console.log(`[SIT] ${subject} (${qid}): ${rows.length} paintings`);
+      return rows;
     } catch (e) {
       console.warn(`[SIT] Failed to fetch for ${subject}:`, e);
+      return [];
     }
   }
 
-  console.log(`[SIT] Pool: ${paintings.length} total paintings`);
+  // Fetch subjects in concurrency-limited batches; dedupe single-threaded between
+  // batches so there's no race on `seen`.
+  for (let i = 0; i < SUBJECTS.length; i += CONCURRENCY) {
+    const results = await Promise.all(SUBJECTS.slice(i, i + CONCURRENCY).map(fetchSubject));
+    for (const rows of results) {
+      for (const r of rows) {
+        if (!seen.has(r.qid)) { seen.add(r.qid); paintings.push(r); }
+      }
+    }
+  }
+
+  console.log(`[SIT] Pool: ${paintings.length} paintings across ${SUBJECTS.length} subjects`);
   return paintings;
 }
 
@@ -818,24 +874,25 @@ async function init() {
   const havePool  = pool && pool.length;
   const poolStale = havePool && (Date.now() - poolBuilt > POOL_TTL_DAYS * 86400000);
 
-  if (!havePool || poolStale) {
-    status.textContent = havePool ? 'gathering new paintings to behold…' : 'a moment to slow down before today\'s painting is revealed';
-    const nextEpoch = poolEpoch + 1;
-    const fresh = await buildPool(String(nextEpoch)).catch(e => {
-      console.warn('[SIT] Pool refresh failed; keeping existing pool:', e.message);
+  if (!havePool) {
+    // First run (or cache invalidated by a version bump): nothing to show yet, so
+    // we must build before picking today's painting. This is the only blocking build.
+    status.textContent = 'a moment to slow down\nbefore today\'s painting\nis revealed';
+    const fresh = await buildPool(String(poolEpoch + 1)).catch(e => {
+      console.warn('[SIT] Pool build failed:', e.message);
       return [];
     });
     if (fresh.length) {
-      pool = fresh; poolEpoch = nextEpoch; poolBuilt = Date.now();
-      console.log(`[SIT] Pool refreshed (epoch ${nextEpoch}): ${fresh.length} paintings`);
-    } else if (!havePool) {
+      pool = fresh; poolEpoch += 1; poolBuilt = Date.now();
+    } else {
       status.textContent = 'Could not load paintings. Check your connection and reload.';
       return;
     }
-    // else: refresh failed but the old pool is still usable — carry on with it.
   }
+  // If the pool is merely stale, we DON'T block — today's painting is picked from the
+  // current pool below, and the refresh happens quietly in the background afterwards.
 
-  status.textContent = 'a moment to slow down before today\'s painting is revealed';
+  status.textContent = 'a moment to slow down\nbefore today\'s painting\nis revealed';
   const candCount = recentlyTonal(history) ? NUM_CANDIDATES_STREAK : NUM_CANDIDATES;
   const candidates = pickCandidates(pool, today, blocked, candCount);
   console.log(`[SIT] Scoring ${candidates.length} candidates…${candCount > NUM_CANDIDATES ? ' (widened — recent days were tonal)' : ''}`);
@@ -880,6 +937,29 @@ async function init() {
   recordToday(entry);
   renderToday(entry);
   setupNav();
+
+  // Today's painting is already on screen. If the pool has passed its TTL, rebuild it
+  // quietly in the background so the next launch has a fresh rotation — no waiting.
+  if (poolStale) refreshPoolInBackground(poolEpoch + 1, entry);
+}
+
+// Rebuild the pool off the critical path and save it for next time, keeping today's
+// already-shown entry intact. Fire-and-forget; a failure just leaves the old pool.
+async function refreshPoolInBackground(nextEpoch, todayEntry) {
+  if (window.__sitRefreshing) return;       // guard against overlapping refreshes
+  window.__sitRefreshing = true;
+  try {
+    console.log('[SIT] Background pool refresh starting…');
+    const fresh = await buildPool(String(nextEpoch));
+    if (fresh.length) {
+      saveCache({ pool: fresh, poolEpoch: nextEpoch, poolBuiltTs: Date.now(), today: todayEntry });
+      console.log(`[SIT] Background pool refresh done (epoch ${nextEpoch}): ${fresh.length} paintings`);
+    }
+  } catch (e) {
+    console.warn('[SIT] Background pool refresh failed; keeping current pool:', e.message);
+  } finally {
+    window.__sitRefreshing = false;
+  }
 }
 
 function setupNav() {

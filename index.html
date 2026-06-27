@@ -9,7 +9,7 @@
   <link rel="apple-touch-icon" href="assets/favicon.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;1,400&family=Inter:wght@300;400&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,700;1,400;1,700&family=Inter:wght@300;400&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -260,14 +260,22 @@
 
     /* ── LOADING / ERROR ── */
     #status {
-      font-family: 'Inter', 'Helvetica Neue', sans-serif;
-      font-weight: 300;
-      font-size: 0.75rem;
-      color: #c0c0c0;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      text-align: center;
-      margin-top: 40px;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 100%;
+      text-align: center;         /* centers every line within the block */
+      white-space: pre-line;      /* render the \n line breaks from the message */
+      font-family: 'EB Garamond', 'Georgia', serif;
+      font-weight: 700;
+      font-style: italic;
+      font-size: 3.5rem;          /* ~56px; three lines fit with margin */
+      line-height: 1.5;
+      letter-spacing: normal;
+      color: #C5B0B1;
+      padding: 0 20px;
+      box-sizing: border-box;
     }
   </style>
 </head>
@@ -298,7 +306,9 @@
       <div class="archive-grid" id="archive-grid"></div>
     </div>
 
-    <div id="status">Hanging today's painting…</div>
+    <div id="status">a moment to slow down
+before today's painting
+is revealed</div>
   </div>
 
   <script src="renderer.js"></script>
