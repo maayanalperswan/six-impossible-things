@@ -1,12 +1,14 @@
 'use strict';
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const CACHE_VERSION    = 13;          // bump to force pool rebuild (13: expanded artist roster)
+const CACHE_VERSION    = 15;          // bump to force pool rebuild + fresh pick (15: variety/darkness scoring)
 const PALETTE_VERSION  = 12;          // bump alone to recompute palette only (12: honest colorfulness metric)
 const NUM_CANDIDATES   = 8;          // paintings scored per day (more candidates → better odds a vivid one is in the mix)
 const NUM_CANDIDATES_STREAK = 12;    // widen the sample on days following a tonal streak
 const ANTISTREAK_LOOKBACK   = 2;     // how many recent displayed days in a row define a "tonal streak"
-const VIVIDNESS_FLOOR       = 30;    // colorfulness below this reads as "tonal" — NEW scale (~0–100+), tune from your console logs
+const VIVIDNESS_FLOOR       = 0.30;  // composite score below this reads as "tonal/dark" — NEW 0–1 scale, tune from console
+const DARK_FLOOR_LO         = 0.18;  // mean lightness at/below which a painting is "too dark" (darkness gate → 0)
+const DARK_FLOOR_HI         = 0.34;  // mean lightness at/above which there is NO darkness penalty (gate → 1). No upper limit — light is fine.
 
 // ─── "IN A ROOM" FILTERING (CLIP) ─────────────────────────────────────────────
 // Some Wikidata images are photographs of a painting hanging in a room (frame +
@@ -51,35 +53,28 @@ const DISPLAY_WIDTH    = 1600;       // larger version fetched only for the one 
 
 // Art movements + specific artists to query on Wikidata
 const MOVEMENTS = [
-  'Dada', 'Vienna Secession', 'Art Nouveau', 'Art Deco',
-  'Pre-Raphaelite Brotherhood', 'Fauvism', 'Surrealism',
-  'Orientalism', 'Impressionism', 'Post-Impressionism',
-  'Dutch Golden Age painting', 'Russian avant-garde', 'Bauhaus',
-  'Symbolism (arts)', 'Early Netherlandish painting', 'Flemish Baroque painting',
+  'Art Nouveau', 'Pre-Raphaelite Brotherhood', 'Fauvism', 'Surrealism',
+  'Impressionism', 'Post-Impressionism', 'Dutch Golden Age painting', 'Flemish Baroque painting',
 ];
 // Individual artists are queried by creator (P170), which Wikidata tags completely —
 // unlike movement tags (P135), which are sparse. Add a colourful painter here and it
 // reliably pulls their whole catalogue. buildPool reads this for both the subject list
 // and the artist-vs-movement decision, so one list keeps everything in sync.
 const ARTISTS = [
-  'Hilma af Klint', 'Egon Schiele', 'J. M. W. Turner', 'James McNeill Whistler', 'Henri de Toulouse-Lautrec',
-  'John Singer Sargent', 'Claude Monet', 'Pierre-Auguste Renoir', 'Berthe Morisot', 'Mary Cassatt',
-  'Vincent van Gogh', 'Paul Gauguin', 'Georges Seurat', 'Paul Signac', 'Henri Matisse',
-  'André Derain', 'Raoul Dufy', 'Wassily Kandinsky', 'Franz Marc', 'August Macke',
+  'Hilma af Klint', 'Egon Schiele', 'J. M. W. Turner', 'Henri de Toulouse-Lautrec', 'John Singer Sargent',
+  'Claude Monet', 'Pierre-Auguste Renoir', 'Vincent van Gogh', 'Paul Gauguin', 'Paul Signac',
+  'Henri Matisse', 'André Derain', 'Raoul Dufy', 'Franz Marc', 'August Macke',
   'Pierre Bonnard', 'Odilon Redon', 'Gustav Klimt', 'Paul Klee', 'Jean-Léon Gérôme',
-  'Maurice de Vlaminck', 'Albert Marquet', 'Henri Manguin', 'Charles Camoin', 'Othon Friesz',
-  'Georges Braque', 'Kees van Dongen', 'Jean Puy', 'Louis Valtat', 'Georges Rouault',
-  'Jules Chéret', 'Théophile Steinlen', 'Leonetto Cappiello', 'George Barbier', 'Olga Boznańska',
-  'Max Kurzweil', 'Koloman Moser', 'Maximilian Lenz', 'Hugo Baar', 'Alphonse Mucha',
-  'Vojtěch Hynais', 'Alois Delug', 'Josef Engelhart', 'Emil Orlik', 'Ferdinand Andri',
-  'Jozef Mehoffer', 'John William Waterhouse', 'Lawrence Alma-Tadema', 'Jean-Auguste-Dominique Ingres', 'Horace Vernet',
-  'David Roberts', 'Eugène Delacroix', 'Alexandre-Gabriel Decamps', 'Thomas Allom', 'John Frederick Lewis',
-  'Prosper Marilhat', 'Charles-Théodore Frère', 'Amadeo Preziosi', 'Eugène Fromentin', 'Charles Landelle',
-  'Alfred Dehodencq', 'Frederick Goodall', 'Gustave Boulanger', 'Alberto Pasini', 'Léon Belly',
-  'Adolf Schreyer', 'Henriette Browne', 'Victor Huguet', 'Josep Tapiró Baró', 'Gustave Guillaumet',
+  'Albert Marquet', 'Henri Manguin', 'Othon Friesz', 'Louis Valtat', 'Georges Rouault',
+  'Jules Chéret', 'Théophile Steinlen', 'Leonetto Cappiello', 'Olga Boznańska', 'Max Kurzweil',
+  'Koloman Moser', 'Maximilian Lenz', 'Hugo Baar', 'Alphonse Mucha', 'Vojtěch Hynais',
+  'Emil Orlik', 'Jozef Mehoffer', 'John William Waterhouse', 'Lawrence Alma-Tadema', 'Jean-Auguste-Dominique Ingres',
+  'Horace Vernet', 'David Roberts', 'Eugène Delacroix', 'Alexandre-Gabriel Decamps', 'Thomas Allom',
+  'John Frederick Lewis', 'Prosper Marilhat', 'Charles-Théodore Frère', 'Amadeo Preziosi', 'Eugène Fromentin',
+  'Charles Landelle', 'Alfred Dehodencq', 'Frederick Goodall', 'Gustave Boulanger', 'Alberto Pasini',
+  'Léon Belly', 'Adolf Schreyer', 'Henriette Browne', 'Victor Huguet', 'Gustave Guillaumet',
   'Georges Clairin', 'Henri Regnault', 'Benjamin Constant', 'Frederick Arthur Bridgman', 'Édouard Debat-Ponsan',
-  'Gustav Bauernfeind', 'Edwin Lord Weeks', 'Eugène Alexis Girardet', 'Rudolf Ernst', 'Ludwig Deutsch',
-  'Giulio Rosati', 'Étienne Dinet', 'Fabio Fabbi', 'Edgar Degas', 'Camille Pissarro',
+  'Gustav Bauernfeind', 'Edwin Lord Weeks', 'Étienne Dinet', 'Edgar Degas', 'Camille Pissarro',
   'Édouard Manet', 'Alfred Sisley', 'Gustave Caillebotte', 'Frédéric Bazille', 'Eugène Boudin',
   'Johan Barthold Jongkind', 'Armand Guillaumin', 'Eva Gonzalès', 'Marie Bracquemond', 'Paul Cézanne',
   'Édouard Vuillard', 'Childe Hassam', 'William Merritt Chase', 'Edmund Tarbell', 'Frank Weston Benson',
@@ -87,13 +82,11 @@ const ARTISTS = [
   'Philip Wilson Steer', 'Giovanni Boldini', 'Joaquín Sorolla', 'Frits Thaulow', 'Max Liebermann',
   'Lovis Corinth', 'Max Slevogt', 'Paul Sérusier', 'Ernst Ludwig Kirchner', 'Alexej von Jawlensky',
   'Jan Toorop', 'Fernand Khnopff', 'Georges de Feure', 'Yves Tanguy', 'Paul Nash',
-  'Alberto Savinio', 'Pierre Roy', 'Jindřich Štyrský', 'Héctor Hyppolite', 'Hashiguchi Goyō',
-  'Arshile Gorky', 'Horace Pippin', 'Morris Hirshfield', 'Arthur G. Dove', 'Henry Ossawa Tanner',
-  'Paula Modersohn-Becker', 'Helene Schjerfbeck', 'Augustin Lesage', 'Gustave Moreau', 'Carlos Schwabe',
-  'Camille Bombois', 'Ivan Generalić', 'Louis Vivin', 'André Bauchant', 'Henri Rousseau',
+  'Hashiguchi Goyō', 'Arshile Gorky', 'Horace Pippin', 'Arthur G. Dove', 'Henry Ossawa Tanner',
+  'Paula Modersohn-Becker', 'Helene Schjerfbeck', 'Gustave Moreau', 'Carlos Schwabe', 'Henri Rousseau',
   'Fujishima Takeji', 'Margaret Macdonald Mackintosh', 'Élisabeth Sonrel', 'Valentin Serov', 'Leon Bakst',
-  'Ferdinand Hodler', 'Victor Borisov-Musatov', 'Edmond-François Aman-Jean', 'Winold Reiss', 'Gerda Wegener',
-  'Umberto Brunelleschi', 'Nils Dardel', 'Kuzma Petrov-Vodkin',
+  'Ferdinand Hodler', 'Victor Borisov-Musatov', 'Edmond-François Aman-Jean', 'Gerda Wegener', 'Nils Dardel',
+  'Kuzma Petrov-Vodkin', 'Artemisia Gentileschi', 'Rachel Ruysch',
 ];
 const SUBJECTS = [...MOVEMENTS, ...ARTISTS];
 
@@ -203,7 +196,7 @@ function extractPalette(canvas, ctx) {
     pixels.push({ r, g, b, h, s, l });
     avgR += r; avgG += g; avgB += b;
   }
-  if (!pixels.length) return { colors: [], vividness: 0 };
+  if (!pixels.length) return { colors: [], vividness: 0, hueVariety: 0, meanL: 0, colorfulness: 0 };
   avgR /= pixels.length; avgG /= pixels.length; avgB /= pixels.length;
 
   // 2. Median-cut into 150 clusters (saturation-aware split)
@@ -313,26 +306,54 @@ function extractPalette(canvas, ctx) {
   // Display sorted light → dark
   palette.sort((a, b) => b.l - a.l);
 
-  // Vividness (for daily candidate ranking): mean chroma of the chosen swatches
-  // Colorfulness (Hasler–Süsstrunk): how much the hues actually spread across the
-  // opponent-colour channels, area-weighted over every pixel. Unlike summed HSL
-  // saturation — which inflates for very light AND very dark colours, so a
-  // monochrome brown landscape scored as "vivid" as a Matisse — this stays low for
-  // tonal / earth-tone images and high for genuinely multi-hue ones. This is what
-  // chooseBest maximises to pick the day's painting, so the metric must be honest.
-  let sRG = 0, sYB = 0, sRG2 = 0, sYB2 = 0;
+  // ── Scoring ──────────────────────────────────────────────────────────────
+  // Judged so "tonal" and "dark" are independent of how SATURATED the colours are.
+  // A soft, multi-hue pastel should rank like the varied painting it is — not get
+  // lumped with monochrome browns just because its chroma is low.
+
+  // (a) Colourfulness (Hasler–Süsstrunk) over every pixel, plus area-true mean
+  //     lightness (for the darkness gate). Colourfulness is kept ONLY as a gentle
+  //     tiebreaker, never a gate — so pastels aren't punished for low saturation.
+  let sRG = 0, sYB = 0, sRG2 = 0, sYB2 = 0, sL = 0;
   for (const p of pixels) {
     const rg = p.r - p.g;
     const yb = 0.5 * (p.r + p.g) - p.b;
     sRG += rg; sYB += yb; sRG2 += rg * rg; sYB2 += yb * yb;
+    sL += p.l;
   }
   const n = pixels.length;
   const mRG = sRG / n, mYB = sYB / n;
   const varRG = Math.max(0, sRG2 / n - mRG * mRG);
   const varYB = Math.max(0, sYB2 / n - mYB * mYB);
-  const vividness = Math.sqrt(varRG + varYB) + 0.3 * Math.sqrt(mRG * mRG + mYB * mYB);
+  const colorfulness = Math.sqrt(varRG + varYB) + 0.3 * Math.sqrt(mRG * mRG + mYB * mYB);
 
-  return { colors: palette.slice(0, 6).map(p => ({ hex: p.hex, rgb: p.rgb })), vividness };
+  // (b) Hue variety across the six swatches — circular spread of their hues,
+  //     weighted by each swatch's saturation so near-grey swatches contribute no
+  //     spurious hue. 0 = one hue family (tonal) … ~1 = hues spread around the wheel.
+  //     Lightness- AND saturation-independent: pale pink / powder blue / sage still
+  //     reads as "varied".
+  const swatches = palette.slice(0, 6);
+  let vx = 0, vy = 0, wsum = 0;
+  for (const p of swatches) {
+    const w = p.s;                            // chroma weight (0–1); grey swatches ≈ 0
+    const a = p.h * Math.PI / 180;
+    vx += w * Math.cos(a); vy += w * Math.sin(a); wsum += w;
+  }
+  const R = wsum > 0.001 ? Math.sqrt(vx * vx + vy * vy) / wsum : 1; // 1 ⇒ all aligned
+  const hueVariety = 1 - R;                   // 0 tonal … ~1 varied
+
+  // (c) Darkness gate — area-true mean lightness. A FLOOR only: very dark images are
+  //     demoted; light / high-key images are never penalised (no upper limit).
+  const meanL = sL / n;
+  const darkGate = Math.min(1, Math.max(0, (meanL - DARK_FLOOR_LO) / (DARK_FLOOR_HI - DARK_FLOOR_LO)));
+
+  // Composite the picker maximises: variety, gated by darkness, nudged by vibrancy.
+  const vividness = (hueVariety + 0.15 * Math.min(colorfulness / 100, 1)) * darkGate;
+
+  return {
+    colors: swatches.map(p => ({ hex: p.hex, rgb: p.rgb })),
+    vividness, hueVariety, meanL, colorfulness,
+  };
 }
 
 // ─── MEDIAN CUT ───────────────────────────────────────────────────────────────
@@ -659,10 +680,10 @@ async function scoreAndExtract(painting) {
   painting.imageUrl = directUrl;
 
   const { canvas, ctx } = await loadImageOnCanvas(directUrl);
-  const { colors, vividness } = extractPalette(canvas, ctx);
+  const { colors, vividness, hueVariety, meanL, colorfulness } = extractPalette(canvas, ctx);
   const { roomScore, onWall } = await scoreRoomCLIP(canvas);
-  console.log(`[SIT] "${painting.title}" vividness=${vividness.toFixed(2)} room=${roomScore.toFixed(2)}${onWall ? ' (in a room — demoted)' : ''}`);
-  return { ...painting, colors, vividness, roomScore, onWall };
+  console.log(`[SIT] "${painting.title}" score=${vividness.toFixed(2)} (variety ${hueVariety.toFixed(2)}, light ${meanL.toFixed(2)}, colourfulness ${colorfulness.toFixed(0)}) room=${roomScore.toFixed(2)}${onWall ? ' (in a room — demoted)' : ''}`);
+  return { ...painting, colors, vividness, hueVariety, meanL, colorfulness, roomScore, onWall };
 }
 
 // ─── UI ───────────────────────────────────────────────────────────────────────
