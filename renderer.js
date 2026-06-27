@@ -2,8 +2,11 @@
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const CACHE_VERSION    = 12;          // bump to force recompute (12: CLIP room filtering)
-const PALETTE_VERSION  = 10;          // bump alone to recompute palette only
-const NUM_CANDIDATES   = 5;          // paintings scored per day
+const PALETTE_VERSION  = 11;          // bump alone to recompute palette only (11: guarantee six swatches)
+const NUM_CANDIDATES   = 8;          // paintings scored per day (more candidates → better odds a vivid one is in the mix)
+const NUM_CANDIDATES_STREAK = 12;    // widen the sample on days following a tonal streak
+const ANTISTREAK_LOOKBACK   = 2;     // how many recent displayed days in a row define a "tonal streak"
+const VIVIDNESS_FLOOR       = 1.6;   // total swatch-chroma below this reads as "tonal" — tune from your console logs
 
 // ─── "IN A ROOM" FILTERING (CLIP) ─────────────────────────────────────────────
 // Some Wikidata images are photographs of a painting hanging in a room (frame +
@@ -41,6 +44,10 @@ const ALL_LABELS = [...ROOM_LABELS, ...FLAT_LABELS];
 const ROOM_SET   = new Set(ROOM_LABELS);
 const HISTORY_DAYS     = 90;         // days of history to keep
 const ARTIST_COOLDOWN  = 30;         // days before same artist may repeat
+const POOL_LIMIT       = 300;        // paintings fetched per subject (was 80 — a fixed sliver of big movements)
+const POOL_TTL_DAYS    = 14;         // rebuild the pool from Wikidata this often, rotating to a fresh slice
+const SCORE_WIDTH      = 512;        // thumbnail width used to SCORE candidates (canvas is capped at 360 anyway)
+const DISPLAY_WIDTH    = 1600;       // larger version fetched only for the one painting actually shown
 
 // Art movements + specific artists to query on Wikidata
 const SUBJECTS = [
@@ -229,13 +236,43 @@ function extractPalette(canvas, ctx) {
   };
   while (palette.length < 6) { const pick = addMaximin(); if (!pick) break; palette.push(toEntry(pick)); }
 
-  // Slot E — fallback: relax the separation floor, fill by coverage
+  // Slot E — GUARANTEE SIX, honestly. Progressively relax the separation floor
+  // and fill by coverage. A tonal painting (a Whistler nocturne, a brown Sargent)
+  // genuinely doesn't hold six well-separated hues, so we keep the floor as high
+  // as we can for as long as we can, then accept closer-but-still-distinct
+  // clusters rather than leaving empty slots.
   if (palette.length < 6) {
-    const relaxed = [...cs].sort((a, b) => b.coverage - a.coverage);
-    for (const c of relaxed) {
-      if (palette.length >= 6) break;
-      if (palette.some(p => p.hex === hexFromRgb(c.r, c.g, c.b))) continue;
-      if (nearestDist(c, palette) >= MINSEP * 0.7) palette.push(toEntry(c));
+    const byCovAll = [...cs].sort((a, b) => b.coverage - a.coverage);
+    for (let floor = MINSEP * 0.7; palette.length < 6 && floor >= 8; floor -= 12) {
+      for (const c of byCovAll) {
+        if (palette.length >= 6) break;
+        if (palette.some(p => p.hex === hexFromRgb(c.r, c.g, c.b))) continue;
+        if (nearestDist(c, palette) >= floor) palette.push(toEntry(c));
+      }
+    }
+  }
+
+  // Slot F — LAST RESORT for near-monochrome images: if even a fully relaxed
+  // floor can't surface six distinct clusters, synthesise the remaining swatches
+  // as evenly-spaced steps along the painting's OWN tonal axis (the darkest →
+  // lightest swatch already chosen). This stays true to the painting — it reads
+  // as a value ramp of its real colours, not invented hue — while always
+  // delivering six.
+  if (palette.length < 6 && palette.length > 0) {
+    const sortedL = [...palette].sort((a, b) => a.l - b.l);
+    const lo = sortedL[0].rgb, hi = sortedL[sortedL.length - 1].rgb;
+    const lerp = (t) => [0, 1, 2].map(k => Math.round(lo[k] + (hi[k] - lo[k]) * t));
+    for (let i = 1; i <= 30 && palette.length < 6; i++) {
+      let rgb = lerp(i / 31);
+      // Solid-colour edge case (lo === hi): walk lightness so we still differ.
+      if (rgb[0] === lo[0] && rgb[1] === lo[1] && rgb[2] === lo[2]) {
+        const d = i * 9;
+        rgb = lo.map(v => Math.max(0, Math.min(255, v + (lo[0] > 128 ? -d : d))));
+      }
+      const hex = hexFromRgb(rgb[0], rgb[1], rgb[2]);
+      if (palette.some(p => p.hex === hex)) continue;
+      const [hh, ss, ll] = rgbToHsl(rgb[0], rgb[1], rgb[2]);
+      palette.push({ hex, rgb, l: ll, h: hh, s: ss });
     }
   }
 
@@ -304,7 +341,11 @@ async function resolveQid(name) {
   return hit.id;
 }
 
-async function fetchPaintingsForQid(qid, isArtist) {
+async function fetchPaintingsForQid(qid, isArtist, salt = '') {
+  // Rotating order: hashing each painting's id with a per-rebuild salt reshuffles
+  // the whole result set, so each pool refresh draws a DIFFERENT window of a big
+  // movement instead of the same fixed sliver every time. Stable within an epoch.
+  const orderBy = `ORDER BY MD5(CONCAT(STR(?painting), "${salt}"))`;
   let sparql;
   if (isArtist) {
     sparql = `
@@ -314,7 +355,7 @@ async function fetchPaintingsForQid(qid, isArtist) {
                   wdt:P18  ?image .
         OPTIONAL { ?painting wdt:P571 ?date . BIND(YEAR(?date) AS ?year) }
         SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
-      } LIMIT 80`;
+      } ${orderBy} LIMIT ${POOL_LIMIT}`;
   } else {
     sparql = `
       SELECT ?painting ?paintingLabel ?creatorLabel ?year ?image WHERE {
@@ -324,7 +365,7 @@ async function fetchPaintingsForQid(qid, isArtist) {
         OPTIONAL { ?painting wdt:P571 ?date . BIND(YEAR(?date) AS ?year) }
         OPTIONAL { ?painting wdt:P170 ?creator . }
         SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
-      } LIMIT 80`;
+      } ${orderBy} LIMIT ${POOL_LIMIT}`;
   }
   const url = `${SPARQL_EP}?query=${encodeURIComponent(sparql)}&format=json`;
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -332,18 +373,24 @@ async function fetchPaintingsForQid(qid, isArtist) {
   return (j.results?.bindings || []).map(row => normalizeRow(row)).filter(Boolean);
 }
 
-async function resolveCommonsUrl(wikifileUrl) {
+async function resolveCommonsUrl(wikifileUrl, width = 0) {
   // Extract filename from a wikidata P18 URL like:
   // http://commons.wikimedia.org/wiki/Special:FilePath/Foo.jpg
   const match = decodeURIComponent(wikifileUrl).match(/Special:FilePath\/(.+)$/i);
   if (!match) return null;
   const filename = match[1].replace(/_/g, ' ');
-  const url = `${COMMONS_API}?action=query&titles=File:${encodeURIComponent(filename)}&prop=imageinfo&iiprop=url&format=json&origin=*`;
+  // width > 0 → ask Commons for a scaled thumbnail (returns thumburl). Full-res
+  // originals are often several MB; a thumbnail is a fraction of that with no
+  // loss for our purposes (palette + CLIP both work on small images).
+  const widthParam = width > 0 ? `&iiurlwidth=${width}` : '';
+  const url = `${COMMONS_API}?action=query&titles=File:${encodeURIComponent(filename)}&prop=imageinfo&iiprop=url${widthParam}&format=json&origin=*`;
   const res = await fetch(url);
   const j   = await res.json();
   const pages = j.query?.pages || {};
   const page  = Object.values(pages)[0];
-  return page?.imageinfo?.[0]?.url || null;
+  const info  = page?.imageinfo?.[0];
+  if (!info) return null;
+  return (width > 0 && info.thumburl) ? info.thumburl : info.url;
 }
 
 function normalizeRow(row) {
@@ -380,6 +427,15 @@ function recentArtists(hist) {
   return new Set(hist.filter(e => e.ts > cutoff).map(e => e.artist).filter(Boolean));
 }
 
+// True when the last ANTISTREAK_LOOKBACK *displayed* days were all tonal (total
+// swatch-chroma below VIVIDNESS_FLOOR). Days with no recorded vividness (older
+// entries) count as non-tonal, so we never widen on missing data.
+function recentlyTonal(hist) {
+  const recent = [...hist].sort((a, b) => b.ts - a.ts).slice(0, ANTISTREAK_LOOKBACK);
+  if (recent.length < ANTISTREAK_LOOKBACK) return false;
+  return recent.every(e => typeof e.vividness === 'number' && e.vividness < VIVIDNESS_FLOOR);
+}
+
 function recordToday(entry) {
   let hist = pruneHistory(loadHistory());
   const today = todayStr();
@@ -408,7 +464,7 @@ function saveCache(data) {
 }
 
 // ─── POOL ─────────────────────────────────────────────────────────────────────
-async function buildPool() {
+async function buildPool(salt = '') {
   console.log('[SIT] Building painting pool from Wikidata…');
   const paintings = [];
   const seen = new Set();
@@ -424,7 +480,7 @@ async function buildPool() {
     const qid = await resolveQid(subject);
     if (!qid) { console.warn(`[SIT] Could not resolve: ${subject}`); continue; }
     try {
-      const rows = await fetchPaintingsForQid(qid, isArtist);
+      const rows = await fetchPaintingsForQid(qid, isArtist, salt);
       for (const r of rows) {
         // Artist queries fix the creator to the QID, so creatorLabel comes back
         // empty — stamp the known artist name (the subject we queried) onto them.
@@ -448,17 +504,18 @@ function deterministicSeed(str) {
   return Math.abs(h);
 }
 
-function pickCandidates(pool, today, blocked) {
+function pickCandidates(pool, today, blocked, count = NUM_CANDIDATES) {
   // Sort pool by QID to ensure consistent ordering across all users/browsers.
   // Without this, Wikidata fetch order varies and different users get different paintings.
   const sorted = [...pool].sort((a, b) => (a.qid > b.qid ? 1 : -1));
-  // Filter out recently seen artists
+  // Filter out recently seen ARTISTS (only the creator is cooled down, never the
+  // movement or the painting itself — a movement may recur freely).
   const eligible = sorted.filter(p => !blocked.has(p.artist));
-  const source   = eligible.length >= NUM_CANDIDATES ? eligible : sorted;
+  const source   = eligible.length >= count ? eligible : sorted;
   const seed     = deterministicSeed(today);
   const indices  = new Set();
   let   n        = 0;
-  while (indices.size < NUM_CANDIDATES && n < source.length * 3) {
+  while (indices.size < count && n < source.length * 3) {
     indices.add((seed + n * 7919) % source.length);
     n++;
   }
@@ -540,8 +597,8 @@ function chooseBest(scored) {
 }
 
 async function scoreAndExtract(painting) {
-  // Resolve direct Commons URL
-  const directUrl = await resolveCommonsUrl(painting.imageWiki);
+  // Resolve a small thumbnail for scoring (the canvas is only 360px anyway).
+  const directUrl = await resolveCommonsUrl(painting.imageWiki, SCORE_WIDTH);
   if (!directUrl) throw new Error('Could not resolve Commons URL');
   painting.imageUrl = directUrl;
 
@@ -648,7 +705,7 @@ async function reconstructDay(pool, dateStr) {
     const pick = candidates[(start + k) % n];
     let directUrl, canvas, ctx;
     try {
-      directUrl = await resolveCommonsUrl(pick.imageWiki);
+      directUrl = await resolveCommonsUrl(pick.imageWiki, DISPLAY_WIDTH);
       if (!directUrl) continue;
       ({ canvas, ctx } = await loadImageOnCanvas(directUrl));
     } catch (e) { continue; }
@@ -751,20 +808,37 @@ async function init() {
     return;
   }
 
-  // We need to pick and score today's painting
-  let pool = cache?.pool || null;
-  if (!pool || !pool.length) {
-    status.textContent = 'Hanging today\'s painting…';
-    pool = await buildPool();
-    if (!pool.length) {
+  // We need to pick and score today's painting.
+  // The pool is cached and reused; we rebuild it from Wikidata only every
+  // POOL_TTL_DAYS, advancing the rotation salt so each refresh surfaces a fresh
+  // slice of each movement. A failed refresh (offline) keeps the existing pool.
+  let pool      = cache?.pool || null;
+  let poolEpoch = cache?.poolEpoch || 0;
+  let poolBuilt = cache?.poolBuiltTs || 0;
+  const havePool  = pool && pool.length;
+  const poolStale = havePool && (Date.now() - poolBuilt > POOL_TTL_DAYS * 86400000);
+
+  if (!havePool || poolStale) {
+    status.textContent = havePool ? 'gathering new paintings to behold…' : 'a moment to slow down before today\'s painting is revealed';
+    const nextEpoch = poolEpoch + 1;
+    const fresh = await buildPool(String(nextEpoch)).catch(e => {
+      console.warn('[SIT] Pool refresh failed; keeping existing pool:', e.message);
+      return [];
+    });
+    if (fresh.length) {
+      pool = fresh; poolEpoch = nextEpoch; poolBuilt = Date.now();
+      console.log(`[SIT] Pool refreshed (epoch ${nextEpoch}): ${fresh.length} paintings`);
+    } else if (!havePool) {
       status.textContent = 'Could not load paintings. Check your connection and reload.';
       return;
     }
+    // else: refresh failed but the old pool is still usable — carry on with it.
   }
 
-  status.textContent = 'Hanging today\'s painting…';
-  const candidates = pickCandidates(pool, today, blocked);
-  console.log(`[SIT] Scoring ${candidates.length} candidates…`);
+  status.textContent = 'a moment to slow down before today\'s painting is revealed';
+  const candCount = recentlyTonal(history) ? NUM_CANDIDATES_STREAK : NUM_CANDIDATES;
+  const candidates = pickCandidates(pool, today, blocked, candCount);
+  console.log(`[SIT] Scoring ${candidates.length} candidates…${candCount > NUM_CANDIDATES ? ' (widened — recent days were tonal)' : ''}`);
 
   const scoredList = [];
   for (const c of candidates) {
@@ -784,6 +858,12 @@ async function init() {
 
   console.log(`[SIT] Chose: "${best.title}" (vividness ${best.vividness.toFixed(2)}, room ${best.roomScore.toFixed(2)})`);
 
+  // The winner was scored on a small thumbnail; fetch a crisp version for display.
+  try {
+    const displayUrl = await resolveCommonsUrl(best.imageWiki, DISPLAY_WIDTH);
+    if (displayUrl) best.imageUrl = displayUrl;
+  } catch { /* keep the thumbnail if the display fetch fails */ }
+
   const entry = {
     date:           today,
     paletteVersion: PALETTE_VERSION,
@@ -793,9 +873,10 @@ async function init() {
     year:           best.year,
     imageUrl:       best.imageUrl,
     colors:         best.colors,
+    vividness:      best.vividness,   // recorded so recentlyTonal() can detect streaks
   };
 
-  saveCache({ pool, today: entry });
+  saveCache({ pool, poolEpoch, poolBuiltTs: poolBuilt, today: entry });
   recordToday(entry);
   renderToday(entry);
   setupNav();
