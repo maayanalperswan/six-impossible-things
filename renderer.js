@@ -1,14 +1,15 @@
 'use strict';
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const CACHE_VERSION    = 15;          // bump to force pool rebuild + fresh pick (15: variety/darkness scoring)
-const PALETTE_VERSION  = 12;          // bump alone to recompute palette only (12: honest colorfulness metric)
+const CACHE_VERSION    = 19;          // bump to force pool rebuild + fresh pick (19: removed Olga Boznańska from artist roster)
+const PALETTE_VERSION  = 39;          // bump alone to recompute palette only (39: green-cool added to MINORITY_FAMS so emerald/forest/viridian gets a reserved slot like teal/blue/purple; MINORITY_MAX 2→3 so a painting with teal+blue+green-cool can surface all three; MINORITY_MIN_COV 0.02→0.015 so pinks and blues at 1.5% canvas qualify. v24–v38 retained)
 const NUM_CANDIDATES   = 8;          // paintings scored per day (more candidates → better odds a vivid one is in the mix)
 const NUM_CANDIDATES_STREAK = 12;    // widen the sample on days following a tonal streak
 const ANTISTREAK_LOOKBACK   = 2;     // how many recent displayed days in a row define a "tonal streak"
 const VIVIDNESS_FLOOR       = 0.30;  // composite score below this reads as "tonal/dark" — NEW 0–1 scale, tune from console
 const DARK_FLOOR_LO         = 0.18;  // mean lightness at/below which a painting is "too dark" (darkness gate → 0)
 const DARK_FLOOR_HI         = 0.34;  // mean lightness at/above which there is NO darkness penalty (gate → 1). No upper limit — light is fine.
+const NEAR_BLACK_L          = 0.13;  // swatches darker than this (HSL lightness) are skipped by the accent + fill slots, so near-black voids aren't seated. FIELD is exempt — a genuinely black-dominant painting still shows it.
 
 // ─── "IN A ROOM" FILTERING (CLIP) ─────────────────────────────────────────────
 // Some Wikidata images are photographs of a painting hanging in a room (frame +
@@ -51,22 +52,30 @@ const POOL_TTL_DAYS    = 14;         // rebuild the pool from Wikidata this ofte
 const SCORE_WIDTH      = 512;        // thumbnail width used to SCORE candidates (canvas is capped at 360 anyway)
 const DISPLAY_WIDTH    = 1600;       // larger version fetched only for the one painting actually shown
 
+// Paintings whose titles contain any of these terms (case-insensitive) are excluded
+// from the pool at build time. Catches Wikimedia colour-chart, calibration-card, and
+// Munsell-chip images that score high on vividness but aren't paintings.
+const BLOCKED_TITLE_TERMS = [
+  'munsell', 'color chart', 'colour chart', 'color scale', 'colour scale',
+  'calibration', 'test card', 'color card', 'colour card',
+];
+
 // Art movements + specific artists to query on Wikidata
 const MOVEMENTS = [
   'Art Nouveau', 'Pre-Raphaelite Brotherhood', 'Fauvism', 'Surrealism',
-  'Impressionism', 'Post-Impressionism', 'Dutch Golden Age painting', 'Flemish Baroque painting',
+  'Impressionism', 'Post-Impressionism', 'Flemish Baroque painting',
 ];
 // Individual artists are queried by creator (P170), which Wikidata tags completely —
 // unlike movement tags (P135), which are sparse. Add a colourful painter here and it
 // reliably pulls their whole catalogue. buildPool reads this for both the subject list
 // and the artist-vs-movement decision, so one list keeps everything in sync.
 const ARTISTS = [
-  'Hilma af Klint', 'Egon Schiele', 'J. M. W. Turner', 'Henri de Toulouse-Lautrec', 'John Singer Sargent',
+  'Hilma af Klint', 'Egon Schiele', 'Henri de Toulouse-Lautrec', 'John Singer Sargent',
   'Claude Monet', 'Pierre-Auguste Renoir', 'Vincent van Gogh', 'Paul Gauguin', 'Paul Signac',
   'Henri Matisse', 'André Derain', 'Raoul Dufy', 'Franz Marc', 'August Macke',
   'Pierre Bonnard', 'Odilon Redon', 'Gustav Klimt', 'Paul Klee', 'Jean-Léon Gérôme',
   'Albert Marquet', 'Henri Manguin', 'Othon Friesz', 'Louis Valtat', 'Georges Rouault',
-  'Jules Chéret', 'Théophile Steinlen', 'Leonetto Cappiello', 'Olga Boznańska', 'Max Kurzweil',
+  'Jules Chéret', 'Théophile Steinlen', 'Leonetto Cappiello', 'Max Kurzweil',
   'Koloman Moser', 'Maximilian Lenz', 'Hugo Baar', 'Alphonse Mucha', 'Vojtěch Hynais',
   'Emil Orlik', 'Jozef Mehoffer', 'John William Waterhouse', 'Lawrence Alma-Tadema', 'Jean-Auguste-Dominique Ingres',
   'Horace Vernet', 'David Roberts', 'Eugène Delacroix', 'Alexandre-Gabriel Decamps', 'Thomas Allom',
@@ -79,7 +88,7 @@ const ARTISTS = [
   'Johan Barthold Jongkind', 'Armand Guillaumin', 'Eva Gonzalès', 'Marie Bracquemond', 'Paul Cézanne',
   'Édouard Vuillard', 'Childe Hassam', 'William Merritt Chase', 'Edmund Tarbell', 'Frank Weston Benson',
   'Theodore Robinson', 'John Henry Twachtman', 'Julian Alden Weir', 'Lilla Cabot Perry', 'Walter Richard Sickert',
-  'Philip Wilson Steer', 'Giovanni Boldini', 'Joaquín Sorolla', 'Frits Thaulow', 'Max Liebermann',
+  'Philip Wilson Steer', 'Joaquín Sorolla', 'Frits Thaulow', 'Max Liebermann',
   'Lovis Corinth', 'Max Slevogt', 'Paul Sérusier', 'Ernst Ludwig Kirchner', 'Alexej von Jawlensky',
   'Jan Toorop', 'Fernand Khnopff', 'Georges de Feure', 'Yves Tanguy', 'Paul Nash',
   'Hashiguchi Goyō', 'Arshile Gorky', 'Horace Pippin', 'Arthur G. Dove', 'Henry Ossawa Tanner',
@@ -186,42 +195,156 @@ function extractPalette(canvas, ctx) {
   const imageData = ctx.getImageData(0, 0, W, H).data;
   const total = W * H;
 
-  // 1. Sample pixels + the painting's average cast
+  // 1. Sample pixels + the painting's average cast (and area-true mean lightness,
+  //    accumulated here so the dark-highlight gate below costs no extra pass)
   const pixels = [];
-  let avgR = 0, avgG = 0, avgB = 0;
+  let avgR = 0, avgG = 0, avgB = 0, sumL = 0;
   for (let i = 0; i < imageData.length; i += 4) {
     if (imageData[i + 3] < 128) continue;
     const r = imageData[i], g = imageData[i + 1], b = imageData[i + 2];
     const [h, s, l] = rgbToHsl(r, g, b);
     pixels.push({ r, g, b, h, s, l });
-    avgR += r; avgG += g; avgB += b;
+    avgR += r; avgG += g; avgB += b; sumL += l;
   }
   if (!pixels.length) return { colors: [], vividness: 0, hueVariety: 0, meanL: 0, colorfulness: 0 };
   avgR /= pixels.length; avgG /= pixels.length; avgB /= pixels.length;
+  const paintingMeanL = sumL / pixels.length;   // 0–1; gates the adaptive dark highlight
 
   // 2. Median-cut into 150 clusters (saturation-aware split)
   const clusters = medianCut(pixels, 150);
 
-  // 3. Representative = MOST VIVID member when meaningfully more saturated than the
-  //    cluster average (lightness stays area-true). dist = distance from the cast.
-  const cs = clusters.map(c => {
-    const aS = rgbToHsl(c.r, c.g, c.b)[1];
-    const vS = rgbToHsl(c.vr, c.vg, c.vb)[1];
-    const useVivid = vS > aS + 0.04;
-    const rr = useVivid ? c.vr : c.r;
-    const gg = useVivid ? c.vg : c.g;
-    const bb = useVivid ? c.vb : c.b;
-    const [dh, ds, dl] = rgbToHsl(rr, gg, bb);
+  // 3. MERGE clusters into perceptual COLOUR FAMILIES. Median-cut alone scatters a
+  //    single colour across many adjacent clusters, so no slot can see how prominent
+  //    a colour really is. Here we walk clusters largest-first; each one either joins
+  //    an existing family (if within MERGE_DIST of that family's anchor) or starts a
+  //    new one. Coverage SUMS across the family, so the coral skirt that fills a
+  //    quarter of the canvas becomes ONE family at 25% — finally visible to selection.
+  //    We test against each family's fixed ANCHOR (its largest member), not a drifting
+  //    centroid, so a smooth gradient can't chain the whole image into one mud family.
+  //    The merge radius SCALES WITH CHROMA. Two muddy tones 60 apart still read as the
+  //    same swatch, so muted colours merge generously (up to ~72); but at high chroma
+  //    that same distance is two genuinely different hues, so vivid colours merge only
+  //    when nearly identical (~36). This kills the "two near-identical browns/greys"
+  //    pairs without collapsing distinct vivid accents.
+  const mergeRadius = (chA, chB) => 30 + (1 - Math.min(chA, chB)) * 42;
+
+  // Hue families (defined here so the MERGE below can respect them). NEUTRAL_CH is the
+  // chroma floor under which a colour is just grey/black/taupe — but PROMINENCE buys it
+  // down: a large region needs far less chroma to read as a real colour than a small one.
+  // A 0.5% smudge must still clear 0.12; a 12%+ region only needs NEUTRAL_CH_LO (0.04).
+  // This is what lets a pastel sky or a dusty green keep its hue identity instead of being
+  // filed as neutral — the misclassification that (a) barred cool tones from their hue
+  // slot and (b) made the backfill read them as mud, so browns (which sit above 0.12)
+  // filled in their place while blues/greens vanished. A true grey (chroma < 0.05) stays
+  // neutral at ANY size — that hard floor guards against a flat wall seating as a colour.
+  // Coverage defaults to 0, so the MERGE and CLUSTERING calls (which don't pass it) keep
+  // the old flat 0.12 bar; only selection-time calls (famOf, usedFams) get the slide.
+  const NEUTRAL_CH = 0.12, NEUTRAL_CH_LO = 0.04;
+  const NEUTRAL_COV_LO = 0.025, NEUTRAL_COV_HI = 0.12;   // coverage band over which it slides
+  const neutralChFor = (coverage) => {
+    const t = Math.min(Math.max((coverage - NEUTRAL_COV_LO) / (NEUTRAL_COV_HI - NEUTRAL_COV_LO), 0), 1);
+    return NEUTRAL_CH - (NEUTRAL_CH - NEUTRAL_CH_LO) * t;
+  };
+  const hueFamily = (h, chroma, coverage = 0) => {
+    if (chroma < neutralChFor(coverage)) return 'neutral';
+    const hh = (((h % 360) + 360) % 360);
+    if (hh < 16 || hh >= 345) return 'red';
+    if (hh < 45)  return 'orange';      // browns live here too
+    if (hh < 70)  return 'yellow';
+    // The old single "green" ran 70–160° — a 90° band that lumped acid yellow-green,
+    // true emerald, and sea-green/mint into ONE slot, so a green-rich painting could
+    // only ever show one of them (and it was usually the biggest olive). Split into
+    // three: a sage and a viridian are as different as a pink and a red and each earns
+    // its own slot. MINSEP_HUE/MINSEP still block two that actually read alike.
+    if (hh < 95)  return 'chartreuse';  // yellow-green / acid / olive-bright
+    // Green split into two families so olive/grass can't block emerald/forest for the same slot.
+    // green-warm (95–122°): olive, grass, lime, bright green
+    // green-cool (122–150°): emerald, forest, viridian, deep green
+    if (hh < 122) return 'green-warm';
+    if (hh < 150) return 'green-cool';
+    if (hh < 200) return 'teal';        // sea-green / mint / aqua / teal
+    if (hh < 255) return 'blue';
+    if (hh < 300) return 'purple';
+    return 'magenta';                   // pink / magenta
+  };
+
+  const clist = clusters.map(c => {
+    const rgb = [c.r, c.g, c.b];          // average — geometry/merge distances run on this
+    const vrgb = [c.vr, c.vg, c.vb];      // saturated representative — what we actually show
+    const lrgb = [c.lr, c.lg, c.lb];      // light representative — for the highlight slot
+    const chroma = (Math.max(...rgb) - Math.min(...rgb)) / 255;
     return {
-      r: rr, g: gg, b: bb, rgb: [rr, gg, bb],
-      h: dh, s: ds, l: dl,
+      rgb, vrgb, lrgb, chroma,
       coverage: c.count / total,
-      dist: pdist([rr, gg, bb], [avgR, avgG, avgB]),
+      vchroma: (Math.max(...vrgb) - Math.min(...vrgb)) / 255,
+      lightL: rgbToHsl(lrgb[0], lrgb[1], lrgb[2])[2],
+      fam: hueFamily(rgbToHsl(rgb[0], rgb[1], rgb[2])[0], chroma),   // hue family of this cluster
     };
-  }).filter(c => c.coverage >= 0.004);
+  }).sort((a, b) => b.coverage - a.coverage);
+
+  // MERGE is HUE-AWARE: a cluster only joins a family of its OWN hue family, even if a
+  // different-family colour is closer in raw distance. This is the fix for "teals/aquas
+  // keep getting lost" — a low-chroma teal sits between green and blue in colour space,
+  // so the generous muted-merge radius used to swallow it into whichever was nearest
+  // before selection ever saw it. Same for dusty mauves vanishing into a dominant pink.
+  // Distance still gates within a family (a near-black and a near-white are both neutral
+  // but far apart, so they don't merge); the hue gate just stops cross-hue absorption.
+  const families = [];
+  for (const c of clist) {
+    let best = null, bd = Infinity;
+    for (const f of families) {
+      if (f.fam !== c.fam) continue;            // never merge across a hue-family boundary
+      const d = pdist(c.rgb, f.anchor);
+      if (d < bd) { bd = d; best = f; }
+    }
+    if (best && bd < mergeRadius(c.chroma, best.anchorChroma)) {
+      best.coverage += c.coverage;
+      if (c.vchroma > best.bestVividChroma) { best.bestVividChroma = c.vchroma; best.bestVividRgb = c.vrgb; }
+      if (c.lightL > best.bestLightL) { best.bestLightL = c.lightL; best.bestLightRgb = c.lrgb; }
+    } else {
+      families.push({ anchor: [...c.rgb], anchorChroma: c.chroma, coverage: c.coverage, fam: c.fam,
+        bestVividChroma: c.vchroma, bestVividRgb: [...c.vrgb],
+        bestLightL: c.lightL, bestLightRgb: [...c.lrgb] });
+    }
+  }
+
+  //    Family swatch: show the most SATURATED real tone the family contains, whenever
+  //    that tone is genuinely chromatic — surfacing the jade not the olive, the cobalt
+  //    not the slate, AND the real (moderate) saturation of a pastel sky rather than a
+  //    washed grey. Only a family with NO saturated member (a true grey, taupe, or
+  //    near-white) keeps its clean average, so neutrals stay honest. Family CLASSIFICATION
+  //    (which hue bucket it belongs to) uses the ANCHOR's hue — the bulk colour of the
+  //    region — not the vivid pixel's hue, so a foliage green whose most-saturated pixels
+  //    happen to lean yellow isn't misfiled as "yellow" and dropped. (Green kept losing
+  //    its slot this way.) The displayed colour is still the saturated one.
+  // A family survives into selection if it's a real region (≥0.4% of canvas) OR a
+  // strongly saturated smaller note — a cobalt tile, a red accent behind a figure — that
+  // the eye catches even at a fraction of a percent. Without the second clause these
+  // vivid specks were dropped HERE, before any slot could see them, and the palette
+  // backfilled a brown in their place. FIELD/LIGHT are coverage/lightness-ranked, so this
+  // only lets a small jewel reach the accent passes — it can't change the field or light.
+  const VIVID_KEEP_CH = 0.45, VIVID_KEEP_COV = 0.0018;
+  const cs = families.filter(f =>
+      f.coverage >= 0.004 ||
+      (f.bestVividChroma >= VIVID_KEEP_CH && f.coverage >= VIVID_KEEP_COV)
+    ).map(f => {
+    const rgb = f.bestVividChroma >= 0.13 ? f.bestVividRgb : f.anchor;
+    const [dh, ds, dl] = rgbToHsl(rgb[0], rgb[1], rgb[2]);
+    const famH = rgbToHsl(f.anchor[0], f.anchor[1], f.anchor[2])[0];   // bulk hue, for family
+    const lightRgb = f.bestLightRgb;
+    const [lh, lsat] = rgbToHsl(lightRgb[0], lightRgb[1], lightRgb[2]);
+    return {
+      r: rgb[0], g: rgb[1], b: rgb[2], rgb,
+      h: dh, s: ds, l: dl, famH,
+      chroma: (Math.max(...rgb) - Math.min(...rgb)) / 255,
+      coverage: f.coverage,
+      dist: pdist(rgb, [avgR, avgG, avgB]),
+      lightRgb, lightL: f.bestLightL, lightH: lh, lightS: lsat,
+    };
+  });
 
   const MINSEP = 85; // hard separation floor between any two swatches
-  const toEntry = (c) => ({ hex: hexFromRgb(c.r, c.g, c.b), rgb: c.rgb, l: c.l, h: c.h, s: c.s });
+  const toEntry = (c) => ({ hex: hexFromRgb(c.r, c.g, c.b), rgb: c.rgb, l: c.l, h: c.h, s: c.s, famH: c.famH, cov: c.coverage });
   const nearestDist = (c, pal) => pal.length ? Math.min(...pal.map(p => pdist(c.rgb, p.rgb))) : Infinity;
   const farEnough = (c, pal) => pal.length === 0 || nearestDist(c, pal) >= MINSEP;
   const palette = [];
@@ -230,38 +353,246 @@ function extractPalette(canvas, ctx) {
   const byCov = [...cs].sort((a, b) => b.coverage - a.coverage);
   if (byCov.length) palette.push(toEntry(byCov[0]));
 
-  // Slot B — DARK: saturation-led anchor, true to the painting (not flat black)
-  const darks = cs.filter(c => c.l < 0.42 && c.coverage >= 0.006)
-    .map(c => ({ c, score: c.s * 2.2 + (0.42 - c.l) * 0.8 + c.coverage * 0.4 }))
-    .sort((a, b) => b.score - a.score);
-  for (const { c } of darks) { if (farEnough(c, palette)) { palette.push(toEntry(c)); break; } }
+  // (No forced dark slot. It used to seat the most-saturated dark cluster as a
+  // value anchor — but that hunts down a near-black even when the painting's story
+  // lives in its mid-tones and accents, stealing a slot for murk. Darks now appear
+  // only when the painting genuinely features one, via FIELD or the maximin accents
+  // below; the NEAR_BLACK_L floor keeps those from being near-black voids.)
 
-  // Slot C — LIGHT: pigmented (powder/cream/lavender), not camel, not near-white
-  const lights = cs.filter(c => c.l > 0.62 && c.l < 0.93 && c.coverage >= 0.005)
-    .map(c => {
-      const pig = Math.min(c.s, 0.55) * 2.0;
-      const camel = c.s < 0.12 ? -0.8 : 0;
-      const tooWhite = c.l > 0.90 ? -0.5 : 0;
-      return { c, score: pig + camel + tooWhite + (c.l - 0.62) * 0.5 + c.coverage * 0.3 };
-    })
-    .sort((a, b) => b.score - a.score);
-  for (const { c } of lights) { if (farEnough(c, palette)) { palette.push(toEntry(c)); break; } }
+  // Slot C — LIGHT / HIGHLIGHT: the painting's lightest genuinely-present note, shown
+  // at its TRUE brightness. Every family carries a light rep (the mean of its lightest
+  // fifth), so a clean white collar, a bright cap, or a luminous sky surfaces as the
+  // light tone it actually is — not the region's darker saturated rep, which used to
+  // make the slot fall back to a dull grey. We rank families by that light rep's
+  // lightness (whitest real tone wins, regardless of area) and DISPLAY the light rep.
+  // The 0.64 floor means a genuinely dark painting (no bright note) gets no forced
+  // highlight — the slot goes to an accent instead, which is honest. Where the lightest
+  // real tone is a dull grey, that grey is still the truth.
+  const LIGHT_L = 0.64, LIGHT_MIN_COV = 0.004, LIGHT_SEP = 30;
+  // Adaptive dark highlight. In a GENUINELY DARK painting nothing may clear the 0.64
+  // floor, so the slot goes unused and the lit passage that carries the whole picture —
+  // a face in lamplight, a single struck highlight — never reads. When that happens we
+  // lower the floor to the painting's OWN brightest real note, never below REL_LIGHT_MIN
+  // so a muddy mid-grey can't seat. The gate is darkness, NOT merely "no bright note": a
+  // MID-KEY painting (tones at 0.5–0.63 but none at 0.64) stays unlit exactly as before —
+  // it isn't dark, it just isn't bright, and a 0.6 grey forced into the light slot is the
+  // regression we were avoiding. The note is displayed at its true brightness, so it stays
+  // honest — if the painting is so dark even its brightest note is below REL_LIGHT_MIN,
+  // there's still no highlight, which is also the truth.
+  const DARK_KEY = 0.30, REL_LIGHT_MIN = 0.42;
+  const lightEligible = cs.filter(c => c.coverage >= LIGHT_MIN_COV);
+  const maxLightL = lightEligible.length ? Math.max(...lightEligible.map(c => c.lightL)) : 0;
+  const lightFloor = (maxLightL >= LIGHT_L || paintingMeanL > DARK_KEY)
+    ? LIGHT_L                               // bright or merely mid-key → unchanged
+    : Math.max(REL_LIGHT_MIN, maxLightL);   // genuinely dark → its own brightest note
+  const lightEntry = (c) => ({
+    hex: hexFromRgb(c.lightRgb[0], c.lightRgb[1], c.lightRgb[2]),
+    rgb: c.lightRgb, l: c.lightL, h: c.lightH, s: c.lightS, famH: c.famH, cov: c.coverage,
+  });
+  const lights = lightEligible.filter(c => c.lightL >= lightFloor)
+    .sort((a, b) => b.lightL - a.lightL || b.coverage - a.coverage);
+  for (const c of lights) {
+    const e = lightEntry(c);
+    if (!palette.length || Math.min(...palette.map(p => pdist(e.rgb, p.rgb))) >= LIGHT_SEP) { palette.push(e); break; }
+  }
 
-  // Slots D — ACCENTS via MAXIMIN (greedy farthest-point): repeatedly add the color
-  //    that maximizes [nearestDist + dist*0.6 + min(cov,0.15)*120], requiring
-  //    nearestDist >= MINSEP. This enforces spread and blocks duplicate hues.
-  const addMaximin = () => {
-    let best = null, bestScore = -1;
-    for (const c of cs) {
-      if (palette.some(p => p.hex === hexFromRgb(c.r, c.g, c.b))) continue;
-      const near = nearestDist(c, palette);
-      if (near < MINSEP) continue;
-      const score = near + c.dist * 0.6 + Math.min(c.coverage, 0.15) * 120;
-      if (score > bestScore) { bestScore = score; best = c; }
-    }
-    return best;
+  // Slots D — ACCENTS by PERCEPTUAL HUE FAMILY. The rule your notes keep circling:
+  //   reflect the painting's variety — a NEW distinct hue always beats a second
+  //   helping of one already shown. We sort every colour into a perceptual family
+  //   (one "yellow", one "orange"/brown, one "green", one "teal"…, plus "neutral" for
+  //   greys/blacks/taupes) and seat the best member of each family, never two of the
+  //   same family until the painting genuinely has nothing else. 30°-wide buckets used
+  //   to split one yellow into two slots and bury the pink; families fix that.
+  //   Family score balances AREA and CHROMA — coverage^0.45 × (0.4 + chroma) — so a
+  //   small vivid pop (a yellow half-moon) and a large muted distinct hue (a pink that
+  //   fills a quarter of the canvas) can each win a slot, while a tiny grey speck can't.
+  // NEUTRAL_CH and hueFamily are defined above the merge (the merge needs them).
+  const MINSEP_HUE = 36;      // guard so two near-identical warm hues across a family
+                              //   boundary (a red-orange beside a red) don't both seat
+  const DEDUP_SEP  = 70;      // last-resort repeats must clear this to avoid near-dupes
+
+  const famOf = (c) => hueFamily(c.famH !== undefined ? c.famH : c.h, c.chroma, c.coverage || 0);
+  // A colour earns an accent slot by STANDING OUT, the way your eye picks a palette —
+  // but standing out is presence AND saturation TOGETHER, not a sum where one dominates.
+  // The old additive score (chroma·1.1 + dist·1.3 + coverage·0.5) let the dist term run
+  // the show: a tiny vivid speck far from the cast outscored a large muted hue sitting
+  // near it, so a 25%-of-canvas purple robe, a sage meadow, a dusty aqua kept losing
+  // their slot to a fleck — and with the colourful slots spent on flecks, the leftovers
+  // backfilled brown. Now the three MULTIPLY:
+  //   (chroma + CHROMA_FLOOR) · coverage^COV_EXP · (1 + min(dist, DIST_CAP)/DIST_NORM)
+  // • CHROMA_FLOOR gives every genuine hue a saturation ground, so a muted tertiary isn't
+  //   zeroed out of contention (a low-chroma purple still counts).
+  // • coverage^COV_EXP makes PRESENCE a real factor — a hue that fills a quarter of the
+  //   canvas can outrank a speck even if the speck is more saturated.
+  // • distance-from-cast is now a gentle 1.0–1.5× NUDGE (capped), not the dominant term,
+  //   so an off-cast pop is still rewarded but can't run away with the palette.
+  // True mud is sequestered as 'neutral' (v27) and competes for only ONE slot, so
+  // rewarding presence here lifts real hues — purples, greens, aquas — not browns.
+  // Knobs: CHROMA_FLOOR up → favours muted hues; COV_EXP down → favours large area;
+  // DIST_CAP/DIST_NORM → how much an off-cast colour is nudged.
+  const CHROMA_FLOOR = 0.15, COV_EXP = 0.35, DIST_CAP = 150, DIST_NORM = 300;
+  const accentScore = (c) =>
+    (c.chroma + CHROMA_FLOOR) * Math.pow(c.coverage, COV_EXP) * (1 + Math.min(c.dist, DIST_CAP) / DIST_NORM);
+  // Chroma-aware area floor for accents. A muted/neutral cluster must be a real region
+  // (~0.8% of canvas) to earn a slot — but a strongly SATURATED cluster earns one at a
+  // fraction of that, because the eye locks onto a small vivid pop it would never notice
+  // in taupe. Mirrors the family filter above so a kept vivid speck isn't re-blocked here.
+  const ACCENT_MIN_COV = 0.008, ACCENT_MIN_COV_HI = 0.0018;
+  const accentCovFloor = (chroma) => {
+    const t = Math.min(Math.max((chroma - 0.20) / 0.30, 0), 1);   // 0 at chroma .20 → 1 at .50
+    return ACCENT_MIN_COV + (ACCENT_MIN_COV_HI - ACCENT_MIN_COV) * t;
   };
-  while (palette.length < 6) { const pick = addMaximin(); if (!pick) break; palette.push(toEntry(pick)); }
+
+  // ── v29 levers — each independently switchable for live attribution ──────────
+  //   VIVID_MEMBER — within a chosen hue family, show its most VIVID member, not the
+  //                  largest/dullest. Doesn't change WHICH families seat.
+  //   MINORITY_BALANCE — reserve up to two slots for genuinely-present EXPRESSIVE minority
+  //                  hues (teal/blue/purple/magenta — the jewel tones that lose slots to
+  //                  big warm/green areas) so pinks and purples stop vanishing. (Was
+  //                  COOL_BALANCE; widened to include pink/magenta and a second slot.)
+  //   VALUE_SPREAD — gated dark anchor for value range, plus tighter PASS-1 dedup.
+  //   ADJ_DEDUP    — two swatches in the SAME or NEIGHBOURING hue family must clear a
+  //                  larger gap, so "two greens / two blues / two tans" stop both seating
+  //                  while genuinely distinct hues that happen to sit close in RGB still can.
+  // Flip any to false, `npm start`, to isolate its effect without a rebuild.
+  const VIVID_MEMBER = true, MINORITY_BALANCE = true, VALUE_SPREAD = true, ADJ_DEDUP = true;
+  const VIVID_REP_MIN_COV = 0.004;             // a member must be ≥0.4% to represent its family
+  const MINORITY_FAMS = new Set(['teal', 'blue', 'purple', 'magenta', 'green-cool']);
+  const MINORITY_MIN_COV = 0.015;              // a minority hue must really be present (≥1.5%) to reserve
+  const MINORITY_MAX = 3;                       // at most this many reserved minority slots
+  const DEDUP_MIN = 52;                         // base PASS-1 separation when VALUE_SPREAD on (vs 36)
+  const ADJ_SEP = 76;                           // same/neighbouring-hue pairs need this much gap
+  const DARK_ANCHOR_L = 0.24, DARK_ANCHOR_MIN_COV = 0.02, DARK_PRESENT_L = 0.30;
+
+  // Adjacency-aware separation. Distinct hues may sit close in RGB and still read apart, but
+  // two of the SAME or NEIGHBOURING family that are also close are a near-dupe. `clears`
+  // returns true only if a candidate is far enough from EVERY seated swatch — the base gap
+  // for distinct hues, the larger ADJ_SEP for same/neighbour-family pairs (incl. two neutrals).
+  const HUE_RING = ['red','orange','yellow','chartreuse','green-warm','green-cool','teal','blue','purple','magenta'];
+  const adjacentFam = (f1, f2) => {
+    if (f1 === f2) return true;                                // same family (incl. neutral+neutral)
+    if (f1 === 'neutral' || f2 === 'neutral') return false;    // neutral vs a hue: not adjacent
+    const i = HUE_RING.indexOf(f1), j = HUE_RING.indexOf(f2);
+    if (i < 0 || j < 0) return false;
+    const d = Math.abs(i - j);
+    return d === 1 || d === HUE_RING.length - 1;               // neighbours on the ring (wraps)
+  };
+  const clears = (c, pal, baseSep) => pal.every(p => {
+    const dist = pdist(c.rgb, p.rgb);
+    if (dist < baseSep) return false;
+    if (!ADJ_DEDUP) return true;
+    const pf = hueFamily(p.famH !== undefined ? p.famH : p.h, (Math.max(...p.rgb) - Math.min(...p.rgb)) / 255, p.cov || 0);
+    return !(adjacentFam(famOf(c), pf) && dist < ADJ_SEP);
+  });
+
+  // FIELD and LIGHT already spoke for their families — don't double up on those hues.
+  const usedFams = new Set(palette.map(p => {
+    const ch = (Math.max(...p.rgb) - Math.min(...p.rgb)) / 255;
+    return hueFamily(p.famH !== undefined ? p.famH : p.h, ch, p.cov || 0);
+  }));
+
+  // Chroma-aware dark gate: colours in the 0.10–0.13 band only enter the accent pool if
+  // they are genuinely saturated (chroma ≥ DARK_CHROMA_MIN). Dark navies, teals, and
+  // crimsons clear this easily (~0.35–0.55); dark muddy browns don't (~0.12–0.22).
+  // Below NEAR_BLACK_L (0.10) nothing seats regardless. Above 0.13 fully unchanged.
+  const DARK_CHROMA_MIN = 0.35;
+  const darkGatePass = (c) =>
+    c.l >= 0.13 ||                                  // above the band — unchanged
+    (c.l >= NEAR_BLACK_L && c.chroma >= DARK_CHROMA_MIN);  // in the band — vivid only
+
+  const accentPool = cs
+    .filter(c => !palette.some(p => p.hex === hexFromRgb(c.r, c.g, c.b)))
+    .filter(c => darkGatePass(c) && c.coverage >= accentCovFloor(c.chroma))
+    .map(c => ({ c, score: accentScore(c) }))
+    .sort((a, b) => b.score - a.score);
+
+  const PASS1_SEP = VALUE_SPREAD ? DEDUP_MIN : MINSEP_HUE;
+
+  // MINORITY_BALANCE — priority reservation BEFORE warm/green families fill every slot.
+  // Reserve up to MINORITY_MAX distinct expressive minority hues that are genuinely present
+  // (≥ MINORITY_MIN_COV) and not already seated, each by its most vivid member. No swap — it
+  // only ADDS a minority hue that's really there, never invents one. This is what keeps the
+  // pinks and purples (and teals/blues) from losing their slot to a large green or warm.
+  if (MINORITY_BALANCE) {
+    const seen = new Set();
+    let reserved = 0;
+    const cands = accentPool
+      .filter(e => MINORITY_FAMS.has(famOf(e.c)) && e.c.coverage >= MINORITY_MIN_COV && !usedFams.has(famOf(e.c)))
+      .map(e => e.c)
+      .sort((a, b) => b.chroma - a.chroma);
+    for (const c of cands) {
+      if (reserved >= MINORITY_MAX || palette.length >= 6) break;
+      const f = famOf(c);
+      if (seen.has(f)) continue;                       // one reservation per family
+      if (palette.length && !clears(c, palette, PASS1_SEP)) continue;
+      palette.push(toEntry(c));
+      usedFams.add(f);
+      seen.add(f);
+      reserved++;
+    }
+  }
+
+  // PASS 1 — one swatch per NEW family. v28's score decides WHICH families appear (presence
+  // + saturation); VIVID_MEMBER decides WHICH MEMBER of each represents it (the vivid one,
+  // by chroma, above a coverage floor so a fleck can't stand for the family).
+  if (VIVID_MEMBER) {
+    const byFam = new Map();
+    for (const e of accentPool) {
+      const f = famOf(e.c);
+      if (!byFam.has(f)) byFam.set(f, { best: e.score, members: [] });
+      const grp = byFam.get(f);
+      if (e.score > grp.best) grp.best = e.score;
+      grp.members.push(e.c);
+    }
+    const famRanked = [...byFam.entries()].sort((a, b) => b[1].best - a[1].best);
+    for (const [f, grp] of famRanked) {
+      if (palette.length >= 6) break;
+      if (usedFams.has(f)) continue;
+      const elig = grp.members.filter(c => c.coverage >= VIVID_REP_MIN_COV);
+      const ranked = (elig.length ? elig : grp.members).slice().sort((a, b) => b.chroma - a.chroma);
+      for (const c of ranked) {
+        if (palette.length && !clears(c, palette, PASS1_SEP)) continue;
+        palette.push(toEntry(c));
+        usedFams.add(f);
+        break;
+      }
+    }
+  } else {
+    for (const { c } of accentPool) {
+      if (palette.length >= 6) break;
+      if (usedFams.has(famOf(c))) continue;
+      if (palette.length && !clears(c, palette, PASS1_SEP)) continue;
+      palette.push(toEntry(c));
+      usedFams.add(famOf(c));
+    }
+  }
+  // PASS 2 — only if still short (a genuinely tonal painting with few families): allow
+  // a repeated family, but demand a real perceptual gap so we never seat two browns or
+  // two greys that read as one swatch.
+  for (const { c } of accentPool) {
+    if (palette.length >= 6) break;
+    if (palette.some(p => p.hex === hexFromRgb(c.r, c.g, c.b))) continue;
+    if (nearestDist(c, palette) < DEDUP_SEP) continue;
+    palette.push(toEntry(c));
+  }
+
+  // VALUE_SPREAD — dark anchor. If the six are all mid-to-light but the painting genuinely
+  // holds a substantial dark region, seat one dark swatch so the palette travels in VALUE,
+  // not only hue. Gated three ways so a high-key painting is never handed a forced black:
+  // the palette must currently LACK a dark (darkest swatch above DARK_PRESENT_L), a real
+  // dark region must EXIST (a cluster in [NEAR_BLACK_L, DARK_ANCHOR_L] with enough area),
+  // and it must clear separation. This is the deliberate, narrow re-admission of the dark
+  // the old blanket dark-slot got wrong — it only fires when value range is actually missing.
+  if (VALUE_SPREAD && palette.length > 0 && palette.length < 6) {
+    const palMinL = Math.min(...palette.map(p => p.l));
+    if (palMinL > DARK_PRESENT_L) {
+      const darkCand = cs
+        .filter(c => c.l <= DARK_ANCHOR_L && c.l >= NEAR_BLACK_L && c.coverage >= DARK_ANCHOR_MIN_COV &&
+                     !palette.some(p => p.hex === hexFromRgb(c.r, c.g, c.b)))
+        .sort((a, b) => b.coverage - a.coverage)[0];
+      if (darkCand && nearestDist(darkCand, palette) >= MINSEP_HUE) palette.push(toEntry(darkCand));
+    }
+  }
 
   // Slot E — GUARANTEE SIX, honestly. Progressively relax the separation floor
   // and fill by coverage. A tonal painting (a Whistler nocturne, a brown Sargent)
@@ -269,11 +600,33 @@ function extractPalette(canvas, ctx) {
   // as we can for as long as we can, then accept closer-but-still-distinct
   // clusters rather than leaving empty slots.
   if (palette.length < 6) {
-    const byCovAll = [...cs].sort((a, b) => b.coverage - a.coverage);
+    // Order leftovers so a genuine chromatic tone is taken before a muddy phantom
+    // mid-tone (median-cut can average a green-beside-red boundary into a brown that
+    // isn't actually anywhere in the painting). Reward presence AND chroma, so real
+    // secondary colours fill first and murk is the true last resort.
+    const byCovAll = [...cs].sort((a, b) =>
+      (Math.pow(b.coverage, 0.4) * (0.4 + b.chroma) + (b.dist / 220) * 0.8)
+      - (Math.pow(a.coverage, 0.4) * (0.4 + a.chroma) + (a.dist / 220) * 0.8));
+    const MUD_CH = 0.26;   // at/below this chroma a fill itself reads as brown/grey/taupe
     for (let floor = MINSEP * 0.7; palette.length < 6 && floor >= 8; floor -= 12) {
       for (const c of byCovAll) {
         if (palette.length >= 6) break;
         if (palette.some(p => p.hex === hexFromRgb(c.r, c.g, c.b))) continue;
+        if (!darkGatePass(c)) continue;            // chroma-aware dark gate — same rule as accent pool
+        // ANTI-MUD. Never backfill a brown/grey/taupe while a genuine colour is still
+        // waiting and could seat at this same floor. "Genuine colour" is coverage-aware
+        // now (famOf via neutralChFor): a prominent pale blue or dusty green classifies as
+        // its hue here, so the browns finally defer to the cool tones that kept vanishing.
+        // median-cut also invents phantom boundary-browns nowhere in the painting; this
+        // defers past them too. Only when no colour remains — or the floor has relaxed far
+        // down — is mud acceptable, so six are still guaranteed.
+        if (c.chroma < MUD_CH && floor > 16) {
+          const realWaits = byCovAll.some(o =>
+            famOf(o) !== 'neutral' && darkGatePass(o) &&
+            !palette.some(p => p.hex === hexFromRgb(o.r, o.g, o.b)) &&
+            nearestDist(o, palette) >= floor);
+          if (realWaits) continue;
+        }
         if (nearestDist(c, palette) >= floor) palette.push(toEntry(c));
       }
     }
@@ -369,13 +722,14 @@ function medianCut(pixels, maxClusters) {
     let widest = -1, widestScore = -1, widestChannel = null;
     buckets.forEach((b, i) => {
       if (b.length < 2) return;
-      let avgS = 0;
-      for (const p of b) avgS += p.s;
-      avgS /= b.length;
       for (const ch of ['r', 'g', 'b']) {
         let mn = 255, mx = 0;
         for (const p of b) { if (p[ch] < mn) mn = p[ch]; if (p[ch] > mx) mx = p[ch]; }
-        const score = (mx - mn) * (1 + avgS * 1.2);
+        // Split purely by colour RANGE. (We used to multiply by saturation, which
+        // shattered vivid regions into many tiny clusters — making the prominence of
+        // a strong colour invisible downstream — and under-split low-saturation
+        // highlights, burying whites. Range alone splits where the image truly varies.)
+        const score = (mx - mn);
         if (score > widestScore) { widestScore = score; widest = i; widestChannel = ch; }
       }
     });
@@ -391,9 +745,26 @@ function medianCut(pixels, maxClusters) {
   }
   return buckets.filter(b => b.length).map(b => {
     const avg = (ch) => Math.round(b.reduce((s, p) => s + p[ch], 0) / b.length);
-    let vivid = b[0], vs = -1;
-    for (const p of b) { if (p.s > vs) { vs = p.s; vivid = p; } }
-    return { r: avg('r'), g: avg('g'), b: avg('b'), vr: vivid.r, vg: vivid.g, vb: vivid.b, count: b.length };
+    // The bucket's plain average desaturates the region toward grey (averaging cancels
+    // chroma). So we ALSO compute a saturated representative: the mean of the most-
+    // saturated fifth of the bucket. That recovers the region's true vivid character —
+    // the jade in a green field, the cobalt in a blue one — while staying robust to a
+    // single stray pixel (which a lone max-saturation pixel would not be).
+    const bySat = b.length > 1 ? [...b].sort((p, q) => q.s - p.s) : b;
+    const topN = Math.max(1, Math.round(bySat.length * 0.2));
+    const vAvg = (ch) => Math.round(bySat.slice(0, topN).reduce((s, p) => s + p[ch], 0) / topN);
+    // ...and a LIGHT representative: the mean of the lightest fifth. The light slot uses
+    // this so a clean highlight (a white collar, a bright sky) surfaces at its real
+    // brightness instead of the region's darker saturated rep. Robust to a single
+    // specular pixel for the same reason.
+    const byLight = b.length > 1 ? [...b].sort((p, q) => q.l - p.l) : b;
+    const lAvg = (ch) => Math.round(byLight.slice(0, topN).reduce((s, p) => s + p[ch], 0) / topN);
+    return {
+      r: avg('r'), g: avg('g'), b: avg('b'),
+      vr: vAvg('r'), vg: vAvg('g'), vb: vAvg('b'),
+      lr: lAvg('r'), lg: lAvg('g'), lb: lAvg('b'),
+      count: b.length,
+    };
   });
 }
 
@@ -565,7 +936,13 @@ async function buildPool(salt = '') {
     const results = await Promise.all(SUBJECTS.slice(i, i + CONCURRENCY).map(fetchSubject));
     for (const rows of results) {
       for (const r of rows) {
-        if (!seen.has(r.qid)) { seen.add(r.qid); paintings.push(r); }
+        if (seen.has(r.qid)) continue;
+        const titleLower = (r.title || '').toLowerCase();
+        if (BLOCKED_TITLE_TERMS.some(t => titleLower.includes(t))) {
+          console.log(`[SIT] Blocked by title filter: "${r.title}"`);
+          continue;
+        }
+        seen.add(r.qid); paintings.push(r);
       }
     }
   }
@@ -599,6 +976,8 @@ function pickCandidates(pool, today, blocked, count = NUM_CANDIDATES) {
   return [...indices].map(i => source[i]);
 }
 
+const MIN_IMAGE_DIM = 300;   // images smaller than this in either dimension are skipped as too pixelated
+
 // ─── IMAGE LOADING + SCORING ──────────────────────────────────────────────────
 function loadImageOnCanvas(url) {
   return new Promise((resolve, reject) => {
@@ -607,6 +986,10 @@ function loadImageOnCanvas(url) {
     const img    = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
+      if (img.naturalWidth < MIN_IMAGE_DIM || img.naturalHeight < MIN_IMAGE_DIM) {
+        reject(new Error(`Image too small: ${img.naturalWidth}×${img.naturalHeight} (min ${MIN_IMAGE_DIM}px)`));
+        return;
+      }
       const maxDim = 360;
       const scale  = Math.min(maxDim / img.naturalWidth, maxDim / img.naturalHeight, 1);
       canvas.width  = Math.round(img.naturalWidth  * scale);
@@ -666,10 +1049,16 @@ async function scoreRoomCLIP(canvas) {
 
 // Pick the most vivid candidate, but prefer flat reproductions: only fall back
 // to "in a room" images if EVERY candidate that day looks like one.
+// Images with almost no colour (engravings, lithographs, B&W photos of works) score
+// near-zero vividness already, but exclude them outright from the daily pick so they
+// can never surface on a thin day. colourfulness < 8 ⇒ effectively greyscale.
+const GRAYSCALE_MAX = 8;
+
 function chooseBest(scored) {
   if (!scored.length) return null;
-  const flat = scored.filter(s => !s.onWall);
-  const pool = flat.length ? flat : scored;
+  const eligible = scored.filter(s => !s.onWall && !(s.colorfulness < GRAYSCALE_MAX));
+  const pool = eligible.length ? eligible
+             : (scored.filter(s => !s.onWall).length ? scored.filter(s => !s.onWall) : scored);
   return pool.reduce((best, s) => (!best || s.vividness > best.vividness ? s : best), null);
 }
 
@@ -875,29 +1264,39 @@ async function init() {
   installDate();   // stamp the device's first-open day (no-op after the first time)
   const cache    = loadCache();
   const history  = pruneHistory(loadHistory());
-  const blocked  = recentArtists(history);
 
-  // Check if we have today's entry cached with the right palette version
-  if (cache?.today?.date === today && cache.today.paletteVersion === PALETTE_VERSION) {
+  // FAST PATH A — today already chosen and cached: show instantly.
+  if (cache?.today?.date === today && cache.today.paletteVersion === PALETTE_VERSION && cache?.pool?.length) {
     console.log('[SIT] Using cached today:', cache.today.title);
     renderToday(cache.today);
     setupNav();
+    schedulePrepare(cache, cache.today);          // make sure tomorrow is ready
     return;
   }
 
-  // We need to pick and score today's painting.
-  // The pool is cached and reused; we rebuild it from Wikidata only every
-  // POOL_TTL_DAYS, advancing the rotation salt so each refresh surfaces a fresh
-  // slice of each movement. A failed refresh (offline) keeps the existing pool.
+  // FAST PATH B — we pre-picked THIS day in the background yesterday: promote it and
+  // show instantly, with no scoring at launch. This is what makes most mornings fast.
+  if (cache?.tomorrow?.date === today && cache.tomorrow.paletteVersion === PALETTE_VERSION && cache?.pool?.length) {
+    const entry = cache.tomorrow;
+    console.log('[SIT] Showing pre-picked painting:', entry.title);
+    recordToday(entry);
+    renderToday(entry);
+    setupNav();
+    saveCache({ pool: cache.pool, poolEpoch: cache.poolEpoch, poolBuiltTs: cache.poolBuiltTs, today: entry, tomorrow: null });
+    schedulePrepare(loadCache(), entry);          // pre-pick the NEW tomorrow (+ refresh pool if stale)
+    return;
+  }
+
+  // SLOW PATH — no usable cache for today: build the pool if needed, then score and
+  // pick now. This is the only launch that waits — first install, a version bump, or
+  // a day skipped so no pre-pick had a chance to run.
   let pool      = cache?.pool || null;
   let poolEpoch = cache?.poolEpoch || 0;
   let poolBuilt = cache?.poolBuiltTs || 0;
-  const havePool  = pool && pool.length;
-  const poolStale = havePool && (Date.now() - poolBuilt > POOL_TTL_DAYS * 86400000);
 
-  if (!havePool) {
+  if (!(pool && pool.length)) {
     // First run (or cache invalidated by a version bump): nothing to show yet, so
-    // we must build before picking today's painting. This is the only blocking build.
+    // we must build before picking today's painting.
     status.textContent = 'a moment to slow down\nbefore today\'s painting\nis revealed';
     const fresh = await buildPool(String(poolEpoch + 1)).catch(e => {
       console.warn('[SIT] Pool build failed:', e.message);
@@ -910,76 +1309,92 @@ async function init() {
       return;
     }
   }
-  // If the pool is merely stale, we DON'T block — today's painting is picked from the
-  // current pool below, and the refresh happens quietly in the background afterwards.
 
   status.textContent = 'a moment to slow down\nbefore today\'s painting\nis revealed';
-  const candCount = recentlyTonal(history) ? NUM_CANDIDATES_STREAK : NUM_CANDIDATES;
-  const candidates = pickCandidates(pool, today, blocked, candCount);
-  console.log(`[SIT] Scoring ${candidates.length} candidates…${candCount > NUM_CANDIDATES ? ' (widened — recent days were tonal)' : ''}`);
-
-  const scoredList = [];
-  for (const c of candidates) {
-    try {
-      scoredList.push(await scoreAndExtract(c));
-    } catch (e) {
-      console.warn('[SIT] Skipped candidate:', c.title, e.message);
-    }
-  }
-
-  const best = chooseBest(scoredList);
-
-  if (!best) {
+  const entry = await pickForDate(pool, today, history);
+  if (!entry) {
     status.textContent = 'Could not load a painting today. Please reload.';
     return;
   }
 
-  console.log(`[SIT] Chose: "${best.title}" (vividness ${best.vividness.toFixed(2)}, room ${best.roomScore.toFixed(2)})`);
+  saveCache({ pool, poolEpoch, poolBuiltTs: poolBuilt, today: entry, tomorrow: cache?.tomorrow || null });
+  recordToday(entry);
+  renderToday(entry);
+  setupNav();
+  schedulePrepare(loadCache(), entry);            // refresh pool if stale + pre-pick tomorrow
+}
 
-  // The winner was scored on a small thumbnail; fetch a crisp version for display.
+// Pick and fully prepare a display-ready entry for a given date: score the day's
+// candidates, choose the best, resolve a crisp display image. Used for today
+// (synchronously on the slow path) and for tomorrow (in the background).
+async function pickForDate(pool, dateStr, history) {
+  const blocked   = recentArtists(history);
+  const candCount = recentlyTonal(history) ? NUM_CANDIDATES_STREAK : NUM_CANDIDATES;
+  const candidates = pickCandidates(pool, dateStr, blocked, candCount);
+  console.log(`[SIT] Scoring ${candidates.length} candidates for ${dateStr}…${candCount > NUM_CANDIDATES ? ' (widened — recent days were tonal)' : ''}`);
+  const scored = [];
+  for (const c of candidates) {
+    try { scored.push(await scoreAndExtract(c)); }
+    catch (e) { console.warn('[SIT] Skipped candidate:', c.title, e.message); }
+  }
+  const best = chooseBest(scored);
+  if (!best) return null;
+  console.log(`[SIT] Chose for ${dateStr}: "${best.title}" (vividness ${best.vividness.toFixed(2)}, room ${best.roomScore.toFixed(2)})`);
   try {
     const displayUrl = await resolveCommonsUrl(best.imageWiki, DISPLAY_WIDTH);
     if (displayUrl) best.imageUrl = displayUrl;
   } catch { /* keep the thumbnail if the display fetch fails */ }
-
-  const entry = {
-    date:           today,
-    paletteVersion: PALETTE_VERSION,
-    qid:            best.qid,
-    title:          best.title,
-    artist:         best.artist,
-    year:           best.year,
-    imageUrl:       best.imageUrl,
-    colors:         best.colors,
-    vividness:      best.vividness,   // recorded so recentlyTonal() can detect streaks
+  return {
+    date: dateStr, paletteVersion: PALETTE_VERSION,
+    qid: best.qid, title: best.title, artist: best.artist, year: best.year,
+    imageUrl: best.imageUrl, colors: best.colors, vividness: best.vividness,
   };
-
-  saveCache({ pool, poolEpoch, poolBuiltTs: poolBuilt, today: entry });
-  recordToday(entry);
-  renderToday(entry);
-  setupNav();
-
-  // Today's painting is already on screen. If the pool has passed its TTL, rebuild it
-  // quietly in the background so the next launch has a fresh rotation — no waiting.
-  if (poolStale) refreshPoolInBackground(poolEpoch + 1, entry);
 }
 
-// Rebuild the pool off the critical path and save it for next time, keeping today's
-// already-shown entry intact. Fire-and-forget; a failure just leaves the old pool.
-async function refreshPoolInBackground(nextEpoch, todayEntry) {
-  if (window.__sitRefreshing) return;       // guard against overlapping refreshes
-  window.__sitRefreshing = true;
+function tomorrowStr() {
+  const d = new Date(); d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// After today's painting is on screen, decide what background work is needed:
+// refresh the pool if it's past its TTL, and/or pre-pick tomorrow if it isn't ready.
+function schedulePrepare(cache, todayEntry) {
+  if (!cache?.pool?.length) return;
+  const stale = Date.now() - (cache.poolBuiltTs || 0) > POOL_TTL_DAYS * 86400000;
+  const haveTomorrow = cache.tomorrow?.date === tomorrowStr()
+                    && cache.tomorrow?.paletteVersion === PALETTE_VERSION;
+  if (!stale && haveTomorrow) return;            // already prepared — nothing to do
+  backgroundPrepare(cache, todayEntry, stale);
+}
+
+// Off the critical path: optionally rebuild the pool, then pre-pick tomorrow's
+// painting so the NEXT launch is instant. Today's shown entry is preserved.
+// Fire-and-forget; any failure just leaves things as-is for next time.
+async function backgroundPrepare(cache, todayEntry, refreshPool) {
+  if (window.__sitPreparing) return;             // guard against overlapping runs
+  window.__sitPreparing = true;
   try {
-    console.log('[SIT] Background pool refresh starting…');
-    const fresh = await buildPool(String(nextEpoch));
-    if (fresh.length) {
-      saveCache({ pool: fresh, poolEpoch: nextEpoch, poolBuiltTs: Date.now(), today: todayEntry });
-      console.log(`[SIT] Background pool refresh done (epoch ${nextEpoch}): ${fresh.length} paintings`);
+    let pool = cache.pool, epoch = cache.poolEpoch || 0, builtTs = cache.poolBuiltTs || 0;
+    if (refreshPool) {
+      console.log('[SIT] Background: refreshing the pool…');
+      const fresh = await buildPool(String(epoch + 1));
+      if (fresh.length) { pool = fresh; epoch += 1; builtTs = Date.now(); }
     }
+    const tStr = tomorrowStr();
+    let tomorrow = cache.tomorrow;
+    const needPick = refreshPool || !tomorrow || tomorrow.date !== tStr
+                  || tomorrow.paletteVersion !== PALETTE_VERSION;
+    if (needPick) {
+      console.log('[SIT] Background: pre-picking tomorrow…');
+      // history includes today (already recorded), so tomorrow avoids today's artist
+      tomorrow = await pickForDate(pool, tStr, pruneHistory(loadHistory()));
+    }
+    saveCache({ pool, poolEpoch: epoch, poolBuiltTs: builtTs, today: todayEntry, tomorrow });
+    console.log(`[SIT] Ready for tomorrow: ${tomorrow ? '"' + tomorrow.title + '"' : '(none)'}`);
   } catch (e) {
-    console.warn('[SIT] Background pool refresh failed; keeping current pool:', e.message);
+    console.warn('[SIT] Background prepare failed:', e.message);
   } finally {
-    window.__sitRefreshing = false;
+    window.__sitPreparing = false;
   }
 }
 
