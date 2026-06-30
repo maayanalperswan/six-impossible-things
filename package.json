@@ -1,6 +1,6 @@
 {
   "name": "six-impossible-things",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A daily painting with a derived color palette",
   "main": "main.js",
   "scripts": {

@@ -2,7 +2,7 @@
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const CACHE_VERSION    = 19;          // bump to force pool rebuild + fresh pick (19: removed Olga Boznańska from artist roster)
-const PALETTE_VERSION  = 39;          // bump alone to recompute palette only (39: green-cool added to MINORITY_FAMS so emerald/forest/viridian gets a reserved slot like teal/blue/purple; MINORITY_MAX 2→3 so a painting with teal+blue+green-cool can surface all three; MINORITY_MIN_COV 0.02→0.015 so pinks and blues at 1.5% canvas qualify. v24–v38 retained)
+const PALETTE_VERSION  = 39;          // bump alone to recompute palette only (39: green-cool added to MINORITY_FAMS so emerald/forest/viridian gets a reserved slot like teal/blue/purple; MINORITY_MAX 2→3 so a painting with teal+blue+green-cool can surface all three; MINORITY_MIN_COV 0.02→0.015 so pinks and blues at 1.5% canvas qualify. todayStr/tomorrowStr/archive loop switched from toISOString/UTC to localDateStr so painting flips at midnight LOCAL time not UTC. v24–v38 retained)
 const NUM_CANDIDATES   = 8;          // paintings scored per day (more candidates → better odds a vivid one is in the mix)
 const NUM_CANDIDATES_STREAK = 12;    // widen the sample on days following a tonal streak
 const ANTISTREAK_LOOKBACK   = 2;     // how many recent displayed days in a row define a "tonal streak"
@@ -887,8 +887,15 @@ function recordToday(entry) {
 }
 
 // ─── CACHE ────────────────────────────────────────────────────────────────────
+function localDateStr(d) {
+  // Format a Date as YYYY-MM-DD in the user's LOCAL timezone, not UTC.
+  // Using toISOString() would return UTC which causes the painting to flip
+  // at midnight UTC rather than midnight local time.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateStr(new Date());
 }
 
 function loadCache() {
@@ -1201,7 +1208,7 @@ async function renderArchive() {
   for (let i = 0; i < 30; i++) {
     const d = new Date(now); d.setDate(d.getDate() - i);
     if (d < installD) break;            // never reach before the install day
-    days.push(d.toISOString().slice(0, 10));
+    days.push(localDateStr(d));
   }
 
   if (!days.length) {
@@ -1253,7 +1260,7 @@ function fillArchiveCard(card, entry, dateStr) {
   }
   const t = document.createElement('div'); t.className = 'archive-title'; t.textContent = entry.title || ''; card.appendChild(t);
   const m = document.createElement('div'); m.className = 'archive-meta';
-  m.textContent = [entry.artist, entry.year, formatFooterDate(dateStr)].filter(Boolean).join(' · '); card.appendChild(m);
+  m.textContent = [entry.artist, entry.year].filter(Boolean).join(' · '); card.appendChild(m);
 }
 
 
@@ -1352,8 +1359,8 @@ async function pickForDate(pool, dateStr, history) {
 }
 
 function tomorrowStr() {
-  const d = new Date(); d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
+  const d = new Date(); d.setDate(d.getDate() + 1);
+  return localDateStr(d);
 }
 
 // After today's painting is on screen, decide what background work is needed:
